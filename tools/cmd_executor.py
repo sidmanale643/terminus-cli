@@ -1,6 +1,7 @@
 from textwrap import dedent
 from models.tool import ToolSchema
 import subprocess
+import re
 from typing import Dict, Any
 
 class CommandExecutor(ToolSchema):
@@ -18,9 +19,7 @@ class CommandExecutor(ToolSchema):
         """)
 
     def json_schema(self) -> Dict[str, Any]:
-        """
-        Defines the expected input schema for the command executor.
-        """
+ 
         return {
         "type": "function",
         "function": {
@@ -39,25 +38,27 @@ class CommandExecutor(ToolSchema):
         }
     }
 
-    def run(self, command: str) -> Dict[str, Any]:
-        """
-        Executes the given command and returns a structured response.
-        """
+    def run(self, command: str, cwd: str = None) -> Dict[str, Any]:
+
         try:
             result = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
-                text=True
+                text=True,
+                cwd=cwd
             )
-            return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout.strip(),
-                "stderr": result.stderr.strip(),
-                "returncode": result.returncode
-            }
+            
+            if result.returncode == 0:
+                return result.stdout if result.stdout else "(command executed successfully, no output)"
+            else:
+                # Command failed - return formatted error
+                error_msg = f"Command failed with exit code {result.returncode}"
+                if result.stderr:
+                    error_msg += f"\nError: {result.stderr}"
+                if result.stdout:
+                    error_msg += f"\nOutput: {result.stdout}"
+                return error_msg
+                
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return f"Error executing command: {str(e)}"
