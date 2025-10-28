@@ -2,9 +2,9 @@ import subprocess
 from models.tool import ToolSchema
 from textwrap import dedent
 
-class ReadFile(ToolSchema):
+class FileReader(ToolSchema):
     def __init__(self):
-        self.name = "read_file"
+        self.name = "file_reader"
     
     def description(self):
         return dedent("""

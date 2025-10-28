@@ -1,7 +1,6 @@
 from textwrap import dedent
 from models.tool import ToolSchema
 import subprocess
-import re
 from typing import Dict, Any
 
 class CommandExecutor(ToolSchema):
@@ -52,7 +51,7 @@ class CommandExecutor(ToolSchema):
             if result.returncode == 0:
                 return result.stdout if result.stdout else "(command executed successfully, no output)"
             else:
-                # Command failed - return formatted error
+              
                 error_msg = f"Command failed with exit code {result.returncode}"
                 if result.stderr:
                     error_msg += f"\nError: {result.stderr}"
