@@ -1,10 +1,10 @@
-from tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator, FileEditor, MultipleFileReader
+from tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator, FileEditor, MultipleFileReader, Ls, SubAgent
 from models.tool import ToolSchema
 
 class ToolRegistry:
     def __init__(self):
         self.tool_box = {}
-        self.tool_schemas = None
+        self.tool_schemas = []
         self.register_all_tools()
         self.generate_tool_schemas()
     
@@ -19,6 +19,8 @@ class ToolRegistry:
         self.register_tool(FileCreator().name, FileCreator())
         self.register_tool(FileEditor().name, FileEditor())
         self.register_tool(MultipleFileReader().name, MultipleFileReader())
+        self.register_tool(Ls().name, Ls())
+        self.register_tool(SubAgent().name, SubAgent())
 
     def generate_tool_schemas(self):
         self.tool_schemas = [tool.json_schema() for tool in self.tool_box.values()]

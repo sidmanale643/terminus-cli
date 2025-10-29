@@ -4,6 +4,9 @@ from .cmd_executor import CommandExecutor
 from .create_file import FileCreator
 from .edit_file import FileEditor
 from .todo import TodoManager
+from .read_multiple_files import MultipleFileReader
+from .subagent import SubAgent
+from .ls import Ls
 
 __all__ = [
     "Grep",
@@ -11,5 +14,8 @@ __all__ = [
     "CommandExecutor",
     "FileCreator",
     "FileEditor",
-    "TodoManager"
+    "TodoManager",
+    "MultipleFileReader",
+    "Ls",
+    "SubAgent",
 ]

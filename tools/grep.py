@@ -24,19 +24,31 @@ class Grep(ToolSchema):
                         "pattern": {  
                             "type": "string",
                             "description": "The text pattern to search for in the codebase"
-                        }
+                        },
+                        "path": {  
+                            "type": "string",
+                            "description": "File or directory to search in. Defaults to current working directory.If specified, it must be an absolute path.",
+                            "default": "."
+                        },
+                        "glob": {  
+                            "type": "string",
+                            "description": "Glob pattern to filter files (e.g. `*.js`, `*.{ts,tsx}`). No filter by default. Defaults to None",
+                            "default": None
+                        },
+                        
+                    
                     },
                     "required": ["pattern"]
                 }
             }
         }
     
-    def run(self, pattern: str, cwd: str = None):
+    def run(self, pattern: str, path: str = None, glob : str = None):
         if not pattern:
             return "Error: Empty pattern provided. Please provide a search pattern."
         
-        query = f"grep -rn --exclude-dir='__pycache__' --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.venv' '{pattern}' ."
-        output = subprocess.run(query, shell=True, capture_output=True, text=True, cwd=cwd)
+        query = f"grep -rn --exclude-dir='__pycache__' --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.venv' --exclude='*.ipynb' '{pattern}' {glob} {glob} ."
+        output = subprocess.run(query, shell=True, capture_output=True, text=True)
         
         if output.returncode == 0:
             return output.stdout if output.stdout else "No matches found."

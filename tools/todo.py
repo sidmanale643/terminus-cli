@@ -18,9 +18,14 @@ class TodoManager(ToolSchema):
 
     def description(self):
         return dedent("""
-        Manage a simple todo list: add, update, and view tasks with statuses
-        such as 'pending', 'in_progress', or 'completed'.
-        Use this tool to create a todo list when the tasks are complex or require multiple steps to complete.
+        Manage a todo list: add, update, and view tasks with statuses such as 'pending', 'in_progress', or 'completed'.
+
+        When to use this tool:
+        - When you are planning a task that requires multiple steps to complete
+        - When you are tracking the progress of a task
+        - When you are managing a list of tasks
+        - When you are tracking the progress of a task
+        
         """)
 
     def json_schema(self):
