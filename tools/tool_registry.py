@@ -1,4 +1,4 @@
-from tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator
+from tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator, FileEditor
 
 class ToolRegistry:
     def __init__(self) -> None:
@@ -20,6 +20,7 @@ class ToolRegistry:
         self.register_tool(CommandExecutor().name, CommandExecutor())
         self.register_tool(TodoManager().name, TodoManager())
         self.register_tool(FileCreator().name, FileCreator())
+        self.register_tool(FileEditor().name, FileEditor())
 
     def generate_tool_schemas(self):
 

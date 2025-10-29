@@ -33,15 +33,15 @@ class FileCreator(ToolSchema):
     
     def run(self, file_path: str):
 
-        file_content = subprocess.run(
+        process = subprocess.run(
             f"touch {file_path}",
             shell=True,
             capture_output=True,
             text=True
         )
 
-        if file_content.returncode != 0:
-            return f"Error reading file: {file_content.stderr.strip() or 'Unknown error.'}"
+        if process.returncode != 0:
+            return f"Error creating file: {process.stderr.strip() or 'Unknown error.'}"
 
-        return f"File Content:\n{file_content.stdout.strip()}"
+        return f"Created File: {file_path}"
         

@@ -55,4 +55,5 @@ class TodoManager(ToolSchema):
                 break
         else:
             self.todos.append(TodoItem(task=task, status=status))
-        return TodoList(items=self.todos)
+
+        return TodoList(items=self.todos).model_dump_json()
