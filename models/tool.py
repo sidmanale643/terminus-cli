@@ -1,4 +1,3 @@
-from pydantic import BaseModel, Field
 from abc import ABC, abstractmethod
 
 class ToolSchema(ABC):
