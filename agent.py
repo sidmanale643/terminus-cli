@@ -67,6 +67,11 @@ class Agent:
     def run(self, user_message):
         print(f"[RUN] Starting agent run with user message: '{user_message}'")
 
+        # Add system prompt if context is empty (first run)
+        if not self.context:
+            self.add_system_message()
+            print("[INIT] System prompt added to context.")
+
         self.add_user_message(user_message)
 
         while self.iteration < self.max_iterations:
