@@ -7,6 +7,7 @@ from .todo import TodoManager
 from .read_multiple_files import MultipleFileReader
 from .subagent import SubAgent
 from .ls import Ls
+from .lint import Lint
 
 __all__ = [
     "Grep",
@@ -18,4 +19,5 @@ __all__ = [
     "MultipleFileReader",
     "Ls",
     "SubAgent",
+    "Lint",
 ]
