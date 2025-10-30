@@ -3,6 +3,7 @@ from utils import groq
 import json
 from prompts import PromptManager
 from dotenv import load_dotenv
+from session_manager import SessionHistory
 
 load_dotenv()
 
@@ -24,14 +25,24 @@ class Agent:
         self.llm_service = None 
         self.tool_registry = ToolRegistry()
         self.model = "kimi-k2-instruct-0905"
+        
+        # Initialize session manager
+        self.session_manager = SessionHistory()
+        print("[INIT] Session manager initialized.")
 
         print("[INIT] Agent initialized successfully.")
 
     def add_system_message(self):
-        self.context.append({"role": "system", "content": self.system_prompt})
+        message = {"role": "system", "content": self.system_prompt}
+        self.context.append(message)
+        # Store complete message structure as JSON
+        self.session_manager.insert_to_session_history("system", json.dumps(message))
     
     def add_user_message(self, content):
-        self.context.append({"role": "user", "content": content})
+        message = {"role": "user", "content": content}
+        self.context.append(message)
+        # Store complete message structure as JSON
+        self.session_manager.insert_to_session_history("user", json.dumps(message))
     
     def add_assistant_message(self, content, tool_calls=None):
 
@@ -50,19 +61,70 @@ class Agent:
                 for tc in (tool_calls if isinstance(tool_calls, list) else [tool_calls])
             ]
         self.context.append(message)
+        # Store complete message structure as JSON (including tool_calls if present)
+        self.session_manager.insert_to_session_history("assistant", json.dumps(message))
 
     def add_tool_message(self, tool_call, tool_output):
-        self.context.append({
+        message = {
             "role": "tool",
             "tool_call_id": tool_call.id,
             "name": tool_call.function.name,
             "content": tool_output
-        })
+        }
+        self.context.append(message)
+        # Store complete message structure as JSON
+        self.session_manager.insert_to_session_history("tool", json.dumps(message))
     
     def update_context_size(self):
         self.message_context_size = [len(message["content"]) for message in self.context]
         self.context_size = sum(self.message_context_size)
         print(f"[CONTEXT] Updated context size: {self.context_size}")
+
+    def get_session_history(self, limit=None):
+        """Retrieve current session history"""
+        return self.session_manager.retrieve_session_history(limit)
+    
+    def get_chat_history(self, name=None, chat_id=None, limit=None):
+        """Retrieve persistent chat history"""
+        return self.session_manager.retrieve_chat_history(name, chat_id, limit)
+    
+    def save_session(self, name):
+        """Save current session to persistent chat history"""
+        # Get session history and parse JSON messages
+        session_messages = self.session_manager.retrieve_session_history()
+        # Parse the JSON content back to message objects
+        parsed_messages = []
+        for msg in session_messages:
+            try:
+                parsed_messages.append(json.loads(msg["content"]))
+            except json.JSONDecodeError:
+                # If it's not JSON, store as-is (backward compatibility)
+                parsed_messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        # Save to chat history
+        return self.session_manager.insert_to_chat_history(name, parsed_messages)
+    
+    def clear_session(self):
+        """Clear current session history"""
+        self.session_manager.clear_session_history()
+        self.context = []
+        self.iteration = 0  # Reset iteration counter as well
+    
+    def load_session(self, name):
+        """Load a saved session into current session"""
+        chat_history = self.session_manager.retrieve_chat_history(name=name, limit=1)
+        if chat_history:
+            # Clear current session first
+            self.clear_session()
+            # Load the saved chat history
+            for message in chat_history[0]["chat_history"]:
+                self.context.append(message)
+                # Store back to session history as JSON
+                self.session_manager.insert_to_session_history(message["role"], json.dumps(message))
+            print(f"[SESSION] Loaded session '{name}' with {len(self.context)} messages.")
+            return True
+        print(f"[SESSION] No session found with name '{name}'.")
+        return False
 
     def run(self, user_message):
         print(f"[RUN] Starting agent run with user message: '{user_message}'")
@@ -130,6 +192,11 @@ class Agent:
 
         print("[STOP] Max iterations reached. Terminating process.")
         return "Max iterations reached. Process terminated."
+
+    def __del__(self):
+        """Cleanup when agent is destroyed"""
+        if hasattr(self, 'session_manager'):
+            self.session_manager.close()
 
 if __name__ == "__main__":
     agent = Agent()
