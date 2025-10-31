@@ -103,5 +103,5 @@ class GroqProvider(LlmProvider):
                         reasoning=reasoning_text
                     )
 
-        except Exception as e:
+        except Exception:
             yield Response(content="", tool_calls=None, stop_reason="error", reasoning=None)

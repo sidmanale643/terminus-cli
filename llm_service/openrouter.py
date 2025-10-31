@@ -104,14 +104,13 @@ class OpenRouterProvider(LlmProvider):
             stream = client.chat.completions.create(**request_params)
 
             for chunk in stream:
-                choice = chunk.choices[0].delta 
+                choice = chunk.choices[0].delta
                 content = getattr(choice, "content", "") or ""
                 reasoning_text = getattr(choice, "reasoning", None)
                 
                 tool_calls = parse_tool_calls(getattr(choice, "tool_calls", None))
 
                 if content or (tool_calls and len(tool_calls) > 0) or reasoning_text:
-                    # Only set tool_use if there are actually tool calls (non-empty list)
                     stop_reason = "tool_use" if (tool_calls and len(tool_calls) > 0) else "end_turn"
                     
                     yield Response(
