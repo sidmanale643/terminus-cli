@@ -271,7 +271,7 @@ class StreamingHandler:
                 # Display thinking header only once
                 if not self.thinking_started:
                     self.status.stop()
-                    self.console.print("\n  [dim #F4AF2D][/] [bold #FF6C00]Thinking[/] ", end="")
+                    self.console.print("\n[dim #F4AF2D][/] [bold #FF6C00]Thinking[/]")
                     self.thinking_started = True
                 # Display thinking message token by token in tron orange
                 text = Text(message, style="#FF6C00")
