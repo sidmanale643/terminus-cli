@@ -1,4 +1,4 @@
-from prompts.system_prompt import SYSTEM_PROMPT
+from src.prompts.system_prompt import SYSTEM_PROMPT
 
 class PromptManager:
     def __init__(self):

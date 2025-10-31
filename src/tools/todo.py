@@ -1,5 +1,5 @@
 from textwrap import dedent
-from models.tool import ToolSchema
+from src.models.tool import ToolSchema
 from pydantic import BaseModel
 from typing import Literal, List
 
@@ -25,7 +25,6 @@ class TodoManager(ToolSchema):
         - When you are tracking the progress of a task
         - When you are managing a list of tasks
         - When you are tracking the progress of a task
-        
         """)
 
     def json_schema(self):

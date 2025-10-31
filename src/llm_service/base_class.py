@@ -1,7 +1,7 @@
 from abc import ABC
 from abc import abstractmethod
 from typing import List, Dict, Optional
-from models.llm import Response
+from src.models.llm import Response
 
 class LlmProvider(ABC):
     @abstractmethod

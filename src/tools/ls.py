@@ -1,6 +1,6 @@
 import subprocess
 import os
-from models.tool import ToolSchema
+from src.models.tool import ToolSchema
 from textwrap import dedent
 
 class Ls(ToolSchema):

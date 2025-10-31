@@ -2,7 +2,7 @@ from textwrap import dedent
 from typing import List
 import aiofiles
 import asyncio
-from models.tool import ToolSchema
+from src.models.tool import ToolSchema
 
 class MultipleFileReader(ToolSchema):
     def __init__(self):

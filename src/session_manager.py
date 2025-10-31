@@ -2,7 +2,7 @@ import sqlite3
 import datetime
 import os
 import json
-from constants import DEFAULT_DATABASE_DIR
+from src.constants import DEFAULT_DATABASE_DIR
 
 class SessionHistory:
     def __init__(self):

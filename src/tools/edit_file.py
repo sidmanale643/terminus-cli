@@ -1,5 +1,5 @@
 from typing import Literal
-from models.tool import ToolSchema 
+from src.models.tool import ToolSchema 
 from textwrap import dedent
 
 class FileEditor(ToolSchema):
@@ -7,7 +7,10 @@ class FileEditor(ToolSchema):
         self.name = "file_editor"
     
     def description(self):
-        return dedent("""modify a file""")
+        return dedent("""
+        Modifies the content of a file.
+        This tool is useful for editing files in the codebase.
+        """)
     
     def json_schema(self):
         return {

@@ -1,5 +1,5 @@
 from openai import OpenAI
-from tools.tool_registry import ToolRegistry
+from src.tools.tool_registry import ToolRegistry
 from pydantic import BaseModel
 from typing import Any, List, Dict
 from groq import Groq

@@ -1,10 +1,10 @@
-from tools.tool_registry import ToolRegistry
+from src.tools.tool_registry import ToolRegistry
 import json
-from prompts import PromptManager
+from src.prompts import PromptManager
 from dotenv import load_dotenv
-from session_manager import SessionHistory
-from llm_service.service import LLMService
-from constants import DEFAULT_PROVIDER, DEFAULT_MODEL
+from src.session_manager import SessionHistory
+from src.llm_service.service import LLMService
+from src.constants import DEFAULT_PROVIDER, DEFAULT_MODEL
 
 load_dotenv()
 

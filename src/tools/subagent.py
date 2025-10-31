@@ -1,4 +1,4 @@
-from models.tool import ToolSchema
+from src.models.tool import ToolSchema
 from textwrap import dedent
 
 class SubAgent(ToolSchema):
@@ -15,6 +15,8 @@ class SubAgent(ToolSchema):
         
         The subagent has access to all the same tools as the main agent but operates
         independently with its own conversation history.
+
+        Use this tool when you want to keep the main agent's context window clean and focused on the current task.
         """).strip()
     
     def json_schema(self):
@@ -39,7 +41,7 @@ class SubAgent(ToolSchema):
     def run(self, task: str):
         try:
             # Import here to avoid circular import
-            from agent import Agent
+            from src.agent import Agent
             
             # Create fresh agent instance for each task
             self.subagent = Agent()

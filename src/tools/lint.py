@@ -1,7 +1,8 @@
 import re
 import subprocess
-from models.tool import ToolSchema
+from src.models.tool import ToolSchema
 import json
+from textwrap import dedent
 
 class Lint(ToolSchema):
     def __init__(self):
@@ -12,7 +13,10 @@ class Lint(ToolSchema):
         return ansi_escape.sub('', text)
 
     def description(self):
-        return "Lint (and optionally fix) the codebase using Ruff."
+        return dedent("""
+        Lint (and optionally fix) the codebase using Ruff.
+        This tool is useful for linting the codebase and fixing linting errors.
+        """)
 
     def json_schema(self):
         return {

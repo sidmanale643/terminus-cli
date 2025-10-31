@@ -1,5 +1,5 @@
 from textwrap import dedent
-from models.tool import ToolSchema
+from src.models.tool import ToolSchema
 import subprocess
 from typing import Dict, Any
 

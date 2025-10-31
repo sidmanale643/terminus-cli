@@ -1,4 +1,4 @@
-from tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator, FileEditor, MultipleFileReader, Ls, SubAgent, Lint
+from src.tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator, FileEditor, MultipleFileReader, Ls, SubAgent, Lint
 
 class ToolRegistry:
     def __init__(self):

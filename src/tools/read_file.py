@@ -1,15 +1,16 @@
 import subprocess
-from models.tool import ToolSchema
+from src.models.tool import ToolSchema
 from textwrap import dedent
 
-class FileCreator(ToolSchema):
+class FileReader(ToolSchema):
     def __init__(self):
-        self.name = "file_creator"
+        self.name = "file_reader"
     
     def description(self):
         return dedent("""
-        Creates a new file with the given file path and content.
-        This tool is useful for creating new files in the codebase.
+        Reads and returns the full content of a specified file path.
+        This tool is useful for accessing and viewing text files such as logs,
+        configuration files, or source code directly from the filesystem.
         """)
     
     def json_schema(self):
@@ -23,7 +24,7 @@ class FileCreator(ToolSchema):
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "the path of the file to create"
+                        "description": "the path of the file to read"
                     }
                 },
                 "required": ["file_path"]
@@ -33,15 +34,15 @@ class FileCreator(ToolSchema):
     
     def run(self, file_path: str):
 
-        process = subprocess.run(
-            f"touch {file_path}",
+        file_content = subprocess.run(
+            f"cat {file_path}",
             shell=True,
             capture_output=True,
             text=True
         )
 
-        if process.returncode != 0:
-            return f"Error creating file: {process.stderr.strip() or 'Unknown error.'}"
+        if file_content.returncode != 0:
+            return f"Error reading file: {file_content.stderr.strip() or 'Unknown error.'}"
 
-        return f"Created File: {file_path}"
+        return f"File Content:\n{file_content.stdout.strip()}"
         

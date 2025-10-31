@@ -1,4 +1,4 @@
-from agent import Agent
+from src.agent import Agent
 from ui.frontend import TerminalDisplay
 import sys
 import os
