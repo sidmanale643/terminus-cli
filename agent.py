@@ -212,19 +212,21 @@ class Agent:
                     model_name=self.model,
                     temperature=0.3
                 ):
+                    if chunk.reasoning:
+                        accumulated_reasoning += chunk.reasoning
+                        
+                        # Only call callback if there's actual content (not just whitespace)
+                        if status_callback and chunk.reasoning.strip():
+                            status_callback(chunk.reasoning, is_thinking=True)
+                    
                     # Accumulate content
                     if chunk.content:
                         accumulated_content += chunk.content
-                        # Send streaming content to callback if provided
+       
                         if streaming_callback:
                             streaming_callback(chunk.content)
                     
-                    # Accumulate reasoning
-                    if chunk.reasoning:
-                        accumulated_reasoning += chunk.reasoning
-                        if status_callback:
-                            status_callback(f"Thinking: {chunk.reasoning}", is_thinking=True)
-                    
+           
                     # Capture tool calls (usually come in final chunk)
                     if chunk.tool_calls:
                         final_tool_calls = chunk.tool_calls
@@ -243,7 +245,7 @@ class Agent:
                     tool_args = json.loads(tool_call.function.arguments)
                     # print(f"[TOOL] Parsed tool arguments: {tool_args}")
                 except json.JSONDecodeError:
-                    # print(f"[ERROR] Failed to parse tool arguments as JSON")
+                    # print("[ERROR] Failed to parse tool arguments as JSON")
                     return "Error: Invalid tool arguments format."
 
                 # Update status with specific tool message
@@ -285,4 +287,4 @@ class Agent:
 if __name__ == "__main__":
     agent = Agent()
     result = agent.run("in which file is the main agent logic defined")
-    # print(f"\n[FINAL RESULT] {result}")
+    #print(f"\n[FINAL RESULT] {result}")
