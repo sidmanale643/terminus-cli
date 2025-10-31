@@ -15,6 +15,18 @@ class CommandExecutor(ToolSchema):
         return dedent("""
         Executes terminal commands and returns their output, error, and exit status.
         Useful for interacting with the underlying system or running scripts.
+
+        AVAILABLE COMMANDS:
+        - cd - change directory
+        - mkdir - create a new directory
+        - touch - create a new file
+        - rm - remove a file or directory
+        - cp - copy a file or directory
+        - mv - move a file or directory
+        - git status - git status
+        - git log - git log
+        - git diff - git diff
+        - git pull - git pull
         """)
 
     def json_schema(self) -> Dict[str, Any]:
