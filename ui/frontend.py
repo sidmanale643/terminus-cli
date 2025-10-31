@@ -294,7 +294,11 @@ class StreamingHandler:
         self.streaming_content.append(content_chunk)
         accumulated = "".join(self.streaming_content)
         
-        # Stop the status spinner when streaming starts
+        # Only create/update display if there's actual content (not just whitespace)
+        if not accumulated.strip():
+            return
+        
+        # Stop the status spinner and create live display when we have content
         if self.live_display is None:
             self.status.stop()
             self.live_display = Live(
@@ -320,8 +324,8 @@ class StreamingHandler:
             )
     
     def has_streamed_content(self):
-        """Check if any content was streamed"""
-        return bool(self.streaming_content)
+        """Check if any content was streamed (with actual visible content)"""
+        return bool(self.streaming_content) and bool("".join(self.streaming_content).strip())
     
     def render_final_response(self, response: str):
         """Render the final response panel only if no streaming occurred"""
