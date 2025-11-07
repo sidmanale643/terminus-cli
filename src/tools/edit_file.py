@@ -10,6 +10,7 @@ class FileEditor(ToolSchema):
         return dedent("""
         Modifies the content of a file.
         This tool is useful for editing files in the codebase.
+        This tool has access to the original content of the file and the sections/sections of the file that need to be edited. The tool then returns the wholed new edited file.
         """)
     
     def json_schema(self):
@@ -27,7 +28,11 @@ class FileEditor(ToolSchema):
                     },
                     "content": {
                         "type": "string",
-                        "description": "the content to write to the file"
+                        "description": "the new content to write to the file"
+                    },
+                    "edited_content": {
+                        "type": "string",
+                        "description": "the content of the file after the edit"
                     },
                     "operation": {
                         "type": "string",
@@ -35,21 +40,21 @@ class FileEditor(ToolSchema):
                         "enum": ["write", "append"]
                     }
                 },
-                "required": ["file_path", "content", "operation"]
+                "required": ["file_path", "content", "operation", "edited_content"]
             }
         }
     }
     
-    def run(self, file_path : str, content : str, operation : Literal["write", "append"]):
+    def run(self, file_path : str, content : str, operation : Literal["write", "append"], edited_content : str):
     
         try:
             if operation == "write":
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                    f.write(edited_content)
             
             else:
                 with open(file_path, 'a', encoding='utf-8') as f:
-                    f.write(content)
+                    f.write(edited_content)
             return f"File {file_path} has been {operation}ed successfully"
             
         except Exception as e:
