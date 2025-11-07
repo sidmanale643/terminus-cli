@@ -22,7 +22,8 @@ class TerminusCLI:
                 response = self.agent.run(
                     user_input, 
                     status_callback=handler.update_status,
-                    streaming_callback=handler.handle_streaming
+                    streaming_callback=handler.handle_streaming,
+                    todo_display_callback=self.display.render_todo_panel
                 )
             
             # Render final response after live display stops to keep content visible
