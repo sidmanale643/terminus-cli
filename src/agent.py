@@ -41,8 +41,10 @@ class Agent:
         self.session_manager.clear_session_history()
         self.add_system_message()
 
-    def add_system_message(self):
-        message = {"role": "system", "content": self.system_prompt}
+    def add_system_message(self, system_prompt: str = None):
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+        message = {"role": "system", "content": system_prompt}
         self.context.append(message)
         self.session_manager.insert_to_session_history("system", json.dumps(message))
     
@@ -159,6 +161,16 @@ class Agent:
             query = tool_args["query"][:30]  # Truncate long queries
             return f"searching web for '{query}'"
         
+        elif tool_name == "todo" and "task" in tool_args:
+            task = tool_args["task"][:40]  # Truncate long task names
+            status = tool_args.get("status", "pending")
+            if status == "completed":
+                return f"completing task: {task}"
+            elif status == "in_progress":
+                return f"starting task: {task}"
+            else:
+                return f"adding task: {task}"
+        
         # Fallback to generic messages
         tool_message = {
             "grep_search": "searching",
@@ -176,7 +188,7 @@ class Agent:
         
         return tool_message.get(tool_name, "calling tool")
 
-    def run(self, user_message, status_callback=None, streaming_callback=None):
+    def run(self, user_message, status_callback=None, streaming_callback=None, todo_display_callback=None):
         """
         Run the agent with a user message
         
@@ -184,6 +196,7 @@ class Agent:
             user_message: The user's input message
             status_callback: Optional callback function to update status (e.g., status_callback("reading file.txt"))
             streaming_callback: Optional callback function to receive streaming content chunks
+            todo_display_callback: Optional callback function to display todo list updates
         """
         # print(f"[RUN] Starting agent run with user message: '{user_message}'")
 
@@ -256,6 +269,16 @@ class Agent:
                 try:
                     tool_output = self.tool_registry.run_tool(tool_call.function.name, **tool_args)
                     # print(f"[TOOL] Tool '{tool_call.function.name}' executed successfully.")
+                    
+                    # If this is a todo tool call, display the todo list
+                    if tool_call.function.name == "todo" and todo_display_callback:
+                        try:
+                            todo_data = json.loads(tool_output)
+                            if "items" in todo_data:
+                                todo_display_callback(todo_data["items"])
+                        except (json.JSONDecodeError, KeyError):
+                            pass  # Silently fail if todo output is not in expected format
+                    
                 except Exception as e:
                     # print(f"[ERROR] Tool execution failed: {e}")
                     tool_error = f"Error executing tool: {str(e)}"
