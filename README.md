@@ -68,32 +68,50 @@ uv run main.py "List Python files in current directory"
 ```
 terminus-cli/
 ├── main.py              # CLI interface & entry point
-├── agent.py             # Core agent logic & orchestration
-├── session_manager.py   # Session & history management
-├── constants.py         # Configuration constants
-├── utils.py             # Utility functions
-├── llm_service/         # LLM provider integrations
-│   ├── service.py       # LLM service manager
-│   ├── groq.py          # Groq provider
-│   ├── openrouter.py    # OpenRouter provider
-│   └── base_class.py    # Base provider interface
-├── models/              # Data models
-│   ├── llm.py           # LLM models
-│   └── tool.py          # Tool models
-├── tools/               # Tool implementations
-│   ├── tool_registry.py # Tool registration
-│   ├── cmd_executor.py  # Command execution
-│   ├── create_file.py   # File creation
-│   ├── edit_file.py     # File editing
-│   ├── read_file.py     # File reading
-│   ├── grep.py          # Search functionality
-│   ├── ls.py            # Directory listing
-│   ├── lint.py          # Code linting
-│   ├── todo.py          # Task management
-│   └── subagent.py      # Sub-agent delegation
-├── prompts/             # System prompts & templates
-│   ├── manager.py       # Prompt management
-│   └── system_prompt.py # Core system prompt
-└── ui/                  # User interface components
-    └── frontend.py      # Rich-based CLI UI
+├── pyproject.toml       # Project configuration
+├── uv.lock              # Dependency lock file
+├── .env.sample          # Environment variables template
+├── README.md            # Documentation
+├── assets/              # Static assets
+│   └── image.png        # Project logo
+├── notebooks/           # Development notebooks
+│   ├── db.ipynb         # Database experiments
+│   ├── streaming.ipynb  # Streaming functionality
+│   ├── testing.ipynb    # Testing experiments
+│   └── test_streaming.py # Streaming tests
+├── ui/                  # User interface components
+│   ├── frontend.py      # Rich-based CLI UI
+│   └── completer.py     # Command completion
+└── src/                 # Source code
+    ├── agent.py         # Core agent logic & orchestration
+    ├── session_manager.py # Session & history management
+    ├── constants.py     # Configuration constants
+    ├── utils.py         # Utility functions
+    ├── llm_service/     # LLM provider integrations
+    │   ├── service.py   # LLM service manager
+    │   ├── groq.py      # Groq provider
+    │   ├── openrouter.py # OpenRouter provider
+    │   └── base_class.py # Base provider interface
+    ├── models/          # Data models
+    │   ├── llm.py       # LLM models
+    │   └── tool.py      # Tool models
+    ├── tools/           # Tool implementations
+    │   ├── __init__.py  # Tool package init
+    │   ├── tool_registry.py # Tool registration
+    │   ├── cmd_executor.py  # Command execution
+    │   ├── create_file.py   # File creation
+    │   ├── edit_file.py     # File editing
+    │   ├── read_file.py     # File reading
+    │   ├── read_multiple_files.py # Multiple file reading
+    │   ├── grep.py          # Search functionality
+    │   ├── ls.py            # Directory listing
+    │   ├── lint.py          # Code linting
+    │   ├── todo.py          # Task management
+    │   ├── subagent.py      # Sub-agent delegation
+    │   └── web_search.py    # Web search functionality
+    └── prompts/         # System prompts & templates
+        ├── __init__.py  # Prompts package init
+        ├── manager.py       # Prompt management
+        ├── system_prompt.py # Core system prompt
+        └── sub_agent.py     # Sub-agent prompts
 ```
