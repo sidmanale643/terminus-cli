@@ -8,10 +8,15 @@ class FileReader(ToolSchema):
     
     def description(self):
         return dedent("""
-        Reads and returns the full content of a specified file path.
-        This tool is useful for accessing and viewing text files such as logs,
-        configuration files, or source code directly from the filesystem.
-        """)
+    Reads a file from the local filesystem. You can access any file directly by using this tool.
+    Assume this tool is able to read all files on the machine. 
+    If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+
+    Usage:
+    - The code line numbers will also be provided starting from 1.
+    - The file_path parameter must be an absolute path, not a relative path
+    - If a file does not exist or read file is empty you will be informed so.
+    """)
     
     def json_schema(self):
         return {
@@ -35,14 +40,20 @@ class FileReader(ToolSchema):
     def run(self, file_path: str):
 
         file_content = subprocess.run(
-            f"cat {file_path}",
+            f"cat -n {file_path}",
             shell=True,
             capture_output=True,
             text=True
         )
 
         if file_content.returncode != 0:
-            return f"Error reading file: {file_content.stderr.strip() or 'Unknown error.'}"
+            error_msg = file_content.stderr.strip()
+            if "No such file or directory" in error_msg:
+                return f"File does not exist"
+            return f"Error reading file: {error_msg or 'Unknown error.'}"
+
+        if not file_content.stdout.strip():
+            return "File is empty"
 
         return f"File Content:\n{file_content.stdout.strip()}"
         

@@ -27,6 +27,18 @@ class CommandExecutor(ToolSchema):
         - git log - git log
         - git diff - git diff
         - git pull - git pull
+
+        Usage:
+        Never use these commands directly using this tool:
+        - ls
+        - cat
+        - grep
+        - find
+        - chmod
+        - touch
+        - mkdir
+        - git push
+        - git commit
         """)
 
     def json_schema(self) -> Dict[str, Any]:
