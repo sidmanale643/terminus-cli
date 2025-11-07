@@ -100,4 +100,90 @@ def groq(messages: List[Dict[str, str]], reasoning: bool = False, reasoning_effo
     except Exception as e:
         print(f"Error in groq: {e}")
         return Response(content="", tool_calls=None, reasoning=None)
+
     
+def parse_file_references(user_input: str):
+    """
+    Parse @filename references from user input.
+    Returns a list of file paths and the cleaned message.
+    
+    Examples:
+        "@file.py what does this do?" -> (["file.py"], "what does this do?")
+        "compare @a.py and @b.py" -> (["a.py", "b.py"], "compare and")
+    """
+    import re
+    
+    # Pattern to match @filename (supports various file extensions and paths)
+    pattern = r'@([\w\-./]+(?:\.\w+)?)'
+    
+    # Find all file references
+    file_refs = re.findall(pattern, user_input)
+    
+    # Remove @ references from the message
+    cleaned_message = re.sub(pattern, '', user_input).strip()
+    # Clean up extra spaces
+    cleaned_message = re.sub(r'\s+', ' ', cleaned_message)
+    
+    return file_refs, cleaned_message
+
+
+def load_file_content(file_path):
+    """
+    Load the content of a file.
+    Raises FileNotFoundError if file doesn't exist.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            file_content = f.read()
+        return file_content
+    except FileNotFoundError:
+        raise FileNotFoundError(f"File not found: {file_path}")
+    except Exception as e:
+        raise Exception(f"Error reading file {file_path}: {str(e)}")
+
+
+def format_file_context(file_path: str, content: str) -> str:
+    """
+    Format file content for injection into the message context.
+    """
+    return f"""
+
+<file path="{file_path}">
+{content}
+</file>"""
+
+
+def process_file_references(user_input: str):
+    """
+    Process user input with @file references.
+    Returns enriched message with file contents and list of loaded files.
+    
+    Returns:
+        tuple: (enriched_message, loaded_files, errors)
+    """
+    file_refs, cleaned_message = parse_file_references(user_input)
+    
+    if not file_refs:
+        return user_input, [], []
+    
+    loaded_files = []
+    errors = []
+    file_contexts = []
+    
+    for file_path in file_refs:
+        try:
+            content = load_file_content(file_path)
+            file_contexts.append(format_file_context(file_path, content))
+            loaded_files.append(file_path)
+        except Exception as e:
+            errors.append(str(e))
+    
+    # Construct the enriched message
+    if file_contexts:
+        enriched_message = f"{cleaned_message}\n\n{''.join(file_contexts)}"
+    else:
+        enriched_message = cleaned_message
+    
+    return enriched_message, loaded_files, errors
+
+

@@ -1,5 +1,6 @@
 from src.agent import Agent
 from ui.frontend import TerminalDisplay
+from src.utils import process_file_references
 import sys
 import os
 import json
@@ -14,16 +15,30 @@ class TerminusCLI:
     def process_query(self, user_input: str):
         """Process user query and coordinate with agent and display"""
         try:
+            # Process @ file references
+            enriched_message, loaded_files, errors = process_file_references(user_input)
+            
+            # Display loaded files
+            if loaded_files:
+                files_list = ", ".join([f"[cyan]{f}[/cyan]" for f in loaded_files])
+                self.display.print_message(f"[dim bright_yellow]📎[/] Loaded files: {files_list}")
+            
+            # Display errors if any
+            if errors:
+                for error in errors:
+                    self.display.print_message(f"[dim bright_red]⚠[/] {error}")
+            
             # Create streaming handler
             handler = self.display.create_streaming_handler()
             
             with handler:
-                # Run agent with streaming callbacks
+                # Run agent with streaming callbacks (use enriched message)
+                # Pass handler to todo_display_callback via lambda
                 response = self.agent.run(
-                    user_input, 
+                    enriched_message, 
                     status_callback=handler.update_status,
                     streaming_callback=handler.handle_streaming,
-                    todo_display_callback=self.display.render_todo_panel
+                    todo_display_callback=lambda todos: self.display.render_todo_panel(todos, handler=handler)
                 )
             
             # Render final response after live display stops to keep content visible

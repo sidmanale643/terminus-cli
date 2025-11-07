@@ -1,6 +1,4 @@
 import os
-import glob
-from pathlib import Path
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 
@@ -30,6 +28,11 @@ class TerminusCompleter(Completer):
         words = text.split()
         current_word = words[-1] if words else ""
         
+        # Check for @ file reference completion
+        if current_word.startswith('@'):
+            yield from self._complete_file_references(document, current_word)
+            return
+        
         # Complete commands if at start or after space
         if len(words) <= 1 or (len(words) > 1 and text.endswith(' ')):
             # Complete slash commands
@@ -56,6 +59,54 @@ class TerminusCompleter(Completer):
         # Complete file paths
         if not current_word.startswith('/') and any(char in text for char in [' ', './', '../', '/']):
             yield from self._complete_files(document, current_word)
+    
+    def _complete_file_references(self, document: Document, current_word: str):
+        """Complete @file references for file inclusion"""
+        # Remove the @ symbol for path processing
+        path_part = current_word[1:]  # Remove @
+        
+        # Determine directory and prefix
+        if not path_part:
+            current_dir = '.'
+            prefix = ''
+        elif '/' in path_part:
+            current_dir = os.path.dirname(path_part) or '.'
+            prefix = os.path.dirname(path_part) + '/' if os.path.dirname(path_part) else ''
+        else:
+            current_dir = '.'
+            prefix = ''
+        
+        try:
+            if os.path.isdir(current_dir):
+                items = []
+                for item in os.listdir(current_dir):
+                    # Skip hidden files and directories
+                    if item.startswith('.'):
+                        continue
+                    
+                    full_path = os.path.join(current_dir, item)
+                    if os.path.isdir(full_path):
+                        # For directories, add trailing slash
+                        items.append((item + '/', 'Directory', full_path))
+                    else:
+                        # Only suggest files with relevant extensions
+                        ext = os.path.splitext(item)[1]
+                        if ext in self.file_extensions:
+                            items.append((item, f'File ({ext})', full_path))
+                
+                # Filter by current path part
+                search_term = os.path.basename(path_part)
+                for item, meta, full_path in items:
+                    if item.startswith(search_term) or not search_term:
+                        completion_text = '@' + prefix + item
+                        yield Completion(
+                            completion_text,
+                            start_position=-len(current_word),
+                            display=item,
+                            display_meta=meta
+                        )
+        except (OSError, PermissionError):
+            pass
     
     def _complete_files(self, document: Document, current_word: str):
         """Complete file and directory paths"""

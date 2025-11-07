@@ -1,10 +1,12 @@
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.prompt import Prompt
 from rich.text import Text
 from rich.live import Live
 from rich.table import Table
+from prompt_toolkit import PromptSession
+from prompt_toolkit.styles import Style as PTStyle
+from ui.completer import TerminusCompleter
 
 
 class TerminalDisplay:
@@ -12,6 +14,22 @@ class TerminalDisplay:
     
     def __init__(self):
         self.console = Console()
+        
+        # Initialize prompt_toolkit session with completer
+        self.completer = TerminusCompleter()
+        
+        # Define prompt style for prompt_toolkit
+        self.prompt_style = PTStyle.from_dict({
+            'prompt': '#FF0000 bold',  # bright red
+            'brackets': '#FF0000',      # bright red
+        })
+        
+        self.prompt_session = PromptSession(
+            completer=self.completer,
+            style=self.prompt_style,
+            complete_while_typing=True,
+            enable_history_search=True,
+        )
     
     def render_banner(self):
         """Display the ASCII art banner with enhanced styling"""
@@ -30,7 +48,13 @@ class TerminalDisplay:
         header = Text(justify="center")
         header.append("Welcome to ", style="white")
         header.append("TERMINUS CLI", style="bold bright_red")
-        header.append("\n\nQuick Commands:\n", style="bold white")
+        header.append("\n\n", style="white")
+        header.append("💡 Tip: Type ", style="dim white")
+        header.append("@", style="bright_cyan")
+        header.append(" and press ", style="dim white")
+        header.append("Tab", style="bright_yellow")
+        header.append(" for file suggestions\n", style="dim white")
+        header.append("\nQuick Commands:\n", style="bold white")
 
         # Commands table
         commands = [
@@ -61,14 +85,21 @@ class TerminalDisplay:
         )
     
     def get_user_input(self):
-        """Get user input with enhanced prompt styling"""
+        """Get user input with enhanced prompt styling and autocomplete"""
+        # Display the prompt using rich for styling
         prompt_text = Text()
         prompt_text.append("┌─[", style="bright_red")
         prompt_text.append("TERMINUS", style="bold bright_red")
         prompt_text.append("]", style="bright_red")
-        prompt_text.append("\n└─> ", style="bright_red")
+        self.console.print(prompt_text)
         
-        return Prompt.ask(prompt_text)
+        # Use prompt_toolkit for input with autocomplete
+        # Format: └─> 
+        try:
+            user_input = self.prompt_session.prompt("└─> ")
+            return user_input
+        except (KeyboardInterrupt, EOFError):
+            raise KeyboardInterrupt()
     
     def create_progress_bar(self, context_percent: float, bar_width: int = 25):
         """Create a colored progress bar based on context usage"""
@@ -176,12 +207,30 @@ class TerminalDisplay:
         help_text.append("  Simply type your query or question and press Enter.\n", style="white")
         help_text.append("  The AI assistant will process your request and provide a response.\n\n", style="white")
         
+        help_text.append("File References:\n\n", style="bold white")
+        help_text.append("  Use ", style="white")
+        help_text.append("@filename", style="bright_cyan")
+        help_text.append(" to reference files in your messages.\n", style="white")
+        help_text.append("  Type ", style="dim white")
+        help_text.append("@", style="bright_cyan")
+        help_text.append(" and press ", style="dim white")
+        help_text.append("Tab", style="bright_yellow")
+        help_text.append(" for autocomplete suggestions.\n", style="dim white")
+        help_text.append("  Examples:\n", style="dim white")
+        help_text.append("    • ", style="dim white")
+        help_text.append("@main.py explain this file", style="bright_cyan")
+        help_text.append("\n", style="white")
+        help_text.append("    • ", style="dim white")
+        help_text.append("compare @file1.py and @file2.py", style="bright_cyan")
+        help_text.append("\n\n", style="white")
+        
         help_text.append("Tips:\n\n", style="bold white")
         help_text.append("  • Use ", style="white")
         help_text.append("Ctrl+C", style="bright_yellow")
         help_text.append(" to cancel a running operation\n", style="white")
         help_text.append("  • Context usage is displayed after each response\n", style="white")
         help_text.append("  • The assistant can help with coding, debugging, and development tasks\n", style="white")
+        help_text.append("  • Reference multiple files with @ to provide more context\n", style="white")
         
         self.console.print(
             Panel(
@@ -222,11 +271,22 @@ class TerminalDisplay:
         """Create a streaming response handler with callbacks"""
         return StreamingHandler(self.console)
     
-    def render_todo_panel(self, todos: list):
-        """Render the todo list panel with status indicators"""
+    def render_todo_panel(self, todos: list, handler=None):
+        """Render the todo list panel with status indicators
+        
+        Args:
+            todos: List of todo items to display
+            handler: Optional StreamingHandler to use for live display updates
+        """
         if not todos:
             return
         
+        # If handler is provided, delegate to its live display
+        if handler is not None:
+            handler.update_todo_display(todos)
+            return
+        
+        # Otherwise, print static panel (backwards compatibility)
         # Filter out completed todos for display (optional - show all for now)
         # active_todos = [t for t in todos if t.get('status') != 'completed']
         # if not active_todos:
@@ -280,6 +340,8 @@ class StreamingHandler:
         self.live_display = None
         self.thinking_started = False
         self.status = None
+        self.todo_live_display = None
+        self.current_todos = []
     
     def start(self):
         """Start the status spinner"""
@@ -296,6 +358,9 @@ class StreamingHandler:
         if self.live_display is not None:
             self.live_display.stop()
             self.live_display = None
+        if self.todo_live_display is not None:
+            self.todo_live_display.stop()
+            self.todo_live_display = None
         if self.status is not None:
             self.status.__exit__(None, None, None)
             self.status = None
@@ -374,6 +439,61 @@ class StreamingHandler:
     def has_streamed_content(self):
         """Check if any content was streamed (with actual visible content)"""
         return bool(self.streaming_content) and bool("".join(self.streaming_content).strip())
+    
+    def update_todo_display(self, todos: list):
+        """Update the live todo display with new todo data"""
+        if not todos:
+            return
+        
+        # Store current todos
+        self.current_todos = todos
+        
+        # Create todo list text with proper alignment
+        todo_lines = []
+        
+        for todo in todos:
+            status = todo.get('status', 'pending')
+            task = todo.get('task', '')
+            
+            # Status indicators
+            if status == 'completed':
+                indicator = "✓"
+                style = "bright_green"
+            elif status == 'in_progress':
+                indicator = "⏳"
+                style = "bright_yellow"
+            else:  # pending
+                indicator = "○"
+                style = "dim white"
+            
+            line = Text()
+            line.append(f"{indicator}  ", style=style)
+            line.append(task, style="white")
+            todo_lines.append(line)
+        
+        # Combine all lines
+        todo_text = Text("\n").join(todo_lines)
+        
+        # Create the panel
+        todo_panel = Panel(
+            todo_text,
+            title="[bold bright_cyan]Todos[/bold bright_cyan]",
+            border_style="bright_cyan",
+            padding=(1, 2),
+            expand=False
+        )
+        
+        # Create or update live display
+        if self.todo_live_display is None:
+            self.todo_live_display = Live(
+                todo_panel,
+                console=self.console,
+                refresh_per_second=10
+            )
+            self.todo_live_display.start()
+        else:
+            # Update existing live display
+            self.todo_live_display.update(todo_panel)
     
     def render_final_response(self, response: str):
         """Render the final response panel only if no streaming occurred"""
