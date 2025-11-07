@@ -221,6 +221,54 @@ class TerminalDisplay:
     def create_streaming_handler(self):
         """Create a streaming response handler with callbacks"""
         return StreamingHandler(self.console)
+    
+    def render_todo_panel(self, todos: list):
+        """Render the todo list panel with status indicators"""
+        if not todos:
+            return
+        
+        # Filter out completed todos for display (optional - show all for now)
+        # active_todos = [t for t in todos if t.get('status') != 'completed']
+        # if not active_todos:
+        #     return
+        
+        # Create todo list text with proper alignment
+        todo_lines = []
+        
+        for todo in todos:
+            status = todo.get('status', 'pending')
+            task = todo.get('task', '')
+            
+            # Status indicators
+            if status == 'completed':
+                indicator = "✓"
+                style = "bright_green"
+            elif status == 'in_progress':
+                indicator = "⏳"
+                style = "bright_yellow"
+            else:  # pending
+                indicator = "○"
+                style = "dim white"
+            
+            line = Text()
+            line.append(f"{indicator}  ", style=style)
+            line.append(task, style="white")
+            todo_lines.append(line)
+        
+        # Combine all lines
+        todo_text = Text("\n").join(todo_lines)
+        
+        # Render panel with minimal padding, centered and square-shaped
+        self.console.print(
+            Panel(
+                todo_text,
+                title="[bold bright_cyan]Todos[/bold bright_cyan]",
+                border_style="bright_cyan",
+                padding=(1, 2),
+                expand=False
+            ),
+            justify="center"
+        )
 
 
 class StreamingHandler:
