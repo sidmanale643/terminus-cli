@@ -279,6 +279,14 @@ class Agent:
                         except (json.JSONDecodeError, KeyError):
                             pass  # Silently fail if todo output is not in expected format
                     
+                    # Display accumulated content first (the assistant's explanation)
+                    if accumulated_content and accumulated_content.strip() and streaming_callback:
+                        # Make sure content ends properly before tool output
+                        if not accumulated_content.endswith('\n'):
+                            streaming_callback(accumulated_content + "\n")
+                        else:
+                            streaming_callback(accumulated_content)
+                    
                     # Display tool output for file_editor in a separate callback (not in markdown)
                     # This allows proper rendering of ANSI-colored diffs
                     if tool_call.function.name == "file_editor" and status_callback:

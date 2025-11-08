@@ -21,12 +21,12 @@ class TerminusCLI:
             # Display loaded files
             if loaded_files:
                 files_list = ", ".join([f"[cyan]{f}[/cyan]" for f in loaded_files])
-                self.display.print_message(f"[dim bright_yellow]📎[/] Loaded files: {files_list}")
+                self.display.print_message(f"[dim bright_yellow]Loaded files: {files_list}")
             
             # Display errors if any
             if errors:
                 for error in errors:
-                    self.display.print_message(f"[dim bright_red]⚠[/] {error}")
+                    self.display.print_message(f"[dim bright_red]Warning: {error}")
             
             # Create streaming handler
             handler = self.display.create_streaming_handler()
