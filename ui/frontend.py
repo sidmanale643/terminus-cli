@@ -371,14 +371,29 @@ class StreamingHandler:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
     
-    def update_status(self, message: str, is_thinking: bool = False):
+    def update_status(self, message: str, is_thinking: bool = False, is_tool_output: bool = False):
         """Callback to update status message"""
         # Stop live display if active
         if self.live_display is not None:
             self.live_display.stop()
             self.live_display = None
         
-        if is_thinking:
+        if is_tool_output:
+            # Display tool output (like diffs) in a separate panel
+            # No need to parse markdown, just display raw with ANSI codes
+            from rich.text import Text as RichText
+            tool_text = RichText.from_ansi(message)
+            self.status.stop()
+            self.console.print(
+                Panel(
+                    tool_text,
+                    title="[bold bright_cyan on black]Changes[/bold bright_cyan on black]",
+                    border_style="bright_cyan on black",
+                    padding=(1, 2)
+                )
+            )
+            self.status.start()
+        elif is_thinking:
             # Only display thinking if there's actual content (not empty or whitespace)
             if message and message.strip():
                 # Display thinking header only once
