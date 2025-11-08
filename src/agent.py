@@ -279,6 +279,15 @@ class Agent:
                         except (json.JSONDecodeError, KeyError):
                             pass  # Silently fail if todo output is not in expected format
                     
+                    # Display tool output for file_editor in a separate callback (not in markdown)
+                    # This allows proper rendering of ANSI-colored diffs
+                    if tool_call.function.name == "file_editor" and status_callback:
+                        status_callback(tool_output, is_thinking=False, is_tool_output=True)
+                    elif streaming_callback and tool_call.function.name in ["file_creator"]:
+                        # For file_creator, add to streaming output
+                        streaming_callback("\n\n")
+                        streaming_callback(tool_output)
+                    
                 except Exception as e:
                     # print(f"[ERROR] Tool execution failed: {e}")
                     tool_error = f"Error executing tool: {str(e)}"
