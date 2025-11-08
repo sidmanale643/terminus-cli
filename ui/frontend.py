@@ -49,7 +49,7 @@ class TerminalDisplay:
         header.append("Welcome to ", style="white")
         header.append("TERMINUS CLI", style="bold bright_red")
         header.append("\n\n", style="white")
-        header.append("💡 Tip: Type ", style="dim white")
+        header.append("Tip: Type ", style="dim white")
         header.append("@", style="bright_cyan")
         header.append(" and press ", style="dim white")
         header.append("Tab", style="bright_yellow")
@@ -500,15 +500,30 @@ class StreamingHandler:
         
         # Create or update live display
         if self.todo_live_display is None:
-            self.todo_live_display = Live(
-                todo_panel,
-                console=self.console,
-                refresh_per_second=10
-            )
-            self.todo_live_display.start()
+            # Stop current status if active to print the centered panel
+            if self.status:
+                self.status.stop()
+            
+            # Print the panel centered
+            self.console.print(todo_panel, justify="center")
+            
+            # Restart status if it was active
+            if self.status:
+                self.status.start()
         else:
-            # Update existing live display
-            self.todo_live_display.update(todo_panel)
+            # For updates, stop, print centered, and restart
+            self.todo_live_display.stop()
+            
+            if self.status:
+                self.status.stop()
+            
+            self.console.print(todo_panel, justify="center")
+            
+            if self.status:
+                self.status.start()
+            
+            # Note: Not restarting todo_live_display as we're just printing static updates
+            self.todo_live_display = None
     
     def render_final_response(self, response: str):
         """Render the final response panel only if no streaming occurred"""
