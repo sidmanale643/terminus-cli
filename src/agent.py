@@ -11,17 +11,23 @@ load_dotenv()
 MAX_ITERATIONS = 50
 
 class Agent:
-    def __init__(self):
+    def __init__(self, cwd=None):
+        """
+        Initialize the Agent
+        
+        Args:
+            cwd: Optional working directory to use in system prompt. If None, uses os.getcwd()
+        """
         # print("[INIT] Initializing Agent...")
 
         self.name = "terminus-cli"
         self.description = ""
         self.context = []
         self.context_size = 0
-        self.model_context_size = 128000
+        self.model_context_size = 200000
         self.iteration = 0
         self.max_iterations = MAX_ITERATIONS
-        self.prompt_manager = PromptManager()
+        self.prompt_manager = PromptManager(cwd=cwd)
         self.system_prompt = self.prompt_manager.get_system_prompt()
         
         # Initialize LLM Service
@@ -232,12 +238,10 @@ class Agent:
                         if status_callback and chunk.reasoning.strip():
                             status_callback(chunk.reasoning, is_thinking=True)
                     
-                    # Accumulate content
+                    # Accumulate content but don't stream it during tool calls
+                    # Only stream the final response to the user
                     if chunk.content:
                         accumulated_content += chunk.content
-       
-                        if streaming_callback:
-                            streaming_callback(chunk.content)
                     
            
                     # Capture tool calls (usually come in final chunk)
@@ -279,13 +283,8 @@ class Agent:
                         except (json.JSONDecodeError, KeyError):
                             pass  # Silently fail if todo output is not in expected format
                     
-                    # Display accumulated content first (the assistant's explanation)
-                    if accumulated_content and accumulated_content.strip() and streaming_callback:
-                        # Make sure content ends properly before tool output
-                        if not accumulated_content.endswith('\n'):
-                            streaming_callback(accumulated_content + "\n")
-                        else:
-                            streaming_callback(accumulated_content)
+                    # Note: accumulated_content was already streamed during the loop above
+                    # No need to send it again via streaming_callback as it would duplicate content
                     
                     # Display tool output for file_editor in a separate callback (not in markdown)
                     # This allows proper rendering of ANSI-colored diffs
@@ -313,6 +312,11 @@ class Agent:
             else:
                 # print("[LLM] No tool calls detected. Returning final response.")
                 # print(f"[OUTPUT] Final content: {accumulated_content[:200]}{'...' if len(accumulated_content) > 200 else ''}")
+                
+                # Stream the final response to the user
+                if streaming_callback and accumulated_content:
+                    streaming_callback(accumulated_content)
+                
                 self.add_assistant_message(accumulated_content)
                 self.update_context_size()
                 return accumulated_content
