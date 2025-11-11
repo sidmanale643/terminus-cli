@@ -160,8 +160,8 @@ class TerminusCLI:
                 if not user_input.strip():
                     continue
                 
-                # Check if it's a command
-                if user_input.startswith('/') or user_input.lower() in ['exit', 'quit', 'q', 'clear']:
+                # Check if it's a command (but not /plan which should be processed as a query)
+                if (user_input.startswith('/') and not user_input.startswith('/plan')) or user_input.lower() in ['exit', 'quit', 'q', 'clear']:
                     should_continue = self.execute_command(user_input)
                     if not should_continue:
                         break

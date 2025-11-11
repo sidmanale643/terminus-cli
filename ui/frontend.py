@@ -59,6 +59,7 @@ class TerminalDisplay:
         # Commands table
         commands = [
             ("/help", "Display help information"),
+            ("/plan <task>", "Create detailed implementation plan"),
             ("/context", "View conversation context"),
             ("/history", "View session history"),
             ("/reset", "Reset session history"),
@@ -190,6 +191,8 @@ class TerminalDisplay:
         
         help_text.append("  /help         ", style="bright_red")
         help_text.append(" - Display this help information\n", style="white")
+        help_text.append("  /plan <task>  ", style="bright_red")
+        help_text.append(" - Create a detailed implementation plan for a feature\n", style="white")
         help_text.append("  /context      ", style="bright_red")
         help_text.append(" - View current conversation context\n", style="white")
         help_text.append("  /history      ", style="bright_red")
@@ -205,7 +208,22 @@ class TerminalDisplay:
         
         help_text.append("Usage:\n\n", style="bold white")
         help_text.append("  Simply type your query or question and press Enter.\n", style="white")
-        help_text.append("  The AI assistant will process your request and provide a response.\n\n", style="white")
+        help_text.append("  The AI assistant will process your request and provide a response.\n", style="white")
+        help_text.append("  Use ", style="white")
+        help_text.append("/plan <description>", style="bright_red")
+        help_text.append(" to create detailed implementation plans.\n\n", style="white")
+        
+        help_text.append("Planning Mode:\n\n", style="bold white")
+        help_text.append("  Use ", style="white")
+        help_text.append("/plan", style="bright_red")
+        help_text.append(" to switch to planning mode for detailed feature planning.\n", style="white")
+        help_text.append("  The planner will:\n", style="dim white")
+        help_text.append("    • Analyze your codebase structure and patterns\n", style="dim white")
+        help_text.append("    • Create a detailed implementation plan as a .md file\n", style="dim white")
+        help_text.append("    • Break down tasks into manageable steps\n", style="dim white")
+        help_text.append("    • Identify risks and technical considerations\n", style="dim white")
+        help_text.append("  Example: ", style="dim white")
+        help_text.append("/plan build a user authentication system\n\n", style="bright_red")
         
         help_text.append("File References:\n\n", style="bold white")
         help_text.append("  Use ", style="white")
@@ -389,8 +407,10 @@ class StreamingHandler:
                     tool_text,
                     title="[bold bright_cyan on black]Changes[/bold bright_cyan on black]",
                     border_style="bright_cyan on black",
-                    padding=(1, 2)
-                )
+                    padding=(1, 2),
+                    expand=False
+                ),
+                justify="center"
             )
             self.status.start()
         elif is_thinking:

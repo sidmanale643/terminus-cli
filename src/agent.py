@@ -1,3 +1,4 @@
+from typing import Literal
 from src.tools.tool_registry import ToolRegistry
 import json
 from src.prompts import PromptManager
@@ -22,6 +23,7 @@ class Agent:
 
         self.name = "terminus-cli"
         self.description = ""
+        self.mode = "default"
         self.context = []
         self.context_size = 0
         self.model_context_size = 200000
@@ -29,6 +31,7 @@ class Agent:
         self.max_iterations = MAX_ITERATIONS
         self.prompt_manager = PromptManager(cwd=cwd)
         self.system_prompt = self.prompt_manager.get_system_prompt()
+        self.planner_prompt = self.prompt_manager.get_planner_prompt()
         
         # Initialize LLM Service
         self.llm_service = LLMService()
@@ -42,6 +45,20 @@ class Agent:
 
         # print("[INIT] Agent initialized successfully.")
     
+    def set_mode(self, name : Literal["default", "plan"] = "default"):
+        if name == "plan":
+            self.mode = "plan"
+            # Update the context with planner prompt if already initialized
+            if self.context:
+                # Replace the system message (first message)
+                self.context[0] = {"role": "system", "content": self.planner_prompt}
+        else:
+            self.mode = "default"
+            # Update the context with default system prompt if already initialized
+            if self.context:
+                # Replace the system message (first message)
+                self.context[0] = {"role": "system", "content": self.system_prompt}
+    
     def reset(self):
         self.context = []
         self.session_manager.clear_session_history()
@@ -49,7 +66,8 @@ class Agent:
 
     def add_system_message(self, system_prompt: str = None):
         if system_prompt is None:
-            system_prompt = self.system_prompt
+            # Use prompt based on current mode
+            system_prompt = self.planner_prompt if self.mode == "plan" else self.system_prompt
         message = {"role": "system", "content": system_prompt}
         self.context.append(message)
         self.session_manager.insert_to_session_history("system", json.dumps(message))
@@ -206,6 +224,16 @@ class Agent:
         """
         # print(f"[RUN] Starting agent run with user message: '{user_message}'")
 
+        # Check if user wants to use planning mode
+        is_plan_mode = user_message.strip().startswith("/plan")
+        if is_plan_mode:
+            self.set_mode(name = "plan")
+            user_message = user_message.replace("/plan", "", 1).strip()
+            
+            # Notify user about mode switch
+            if status_callback:
+                status_callback("switched to plan mode", is_thinking=False)
+        
         if not self.context:
             self.add_system_message()
             # print("[INIT] System prompt added to context.")
@@ -319,9 +347,17 @@ class Agent:
                 
                 self.add_assistant_message(accumulated_content)
                 self.update_context_size()
+                
+                # Reset mode back to default if this was a /plan query
+                if is_plan_mode:
+                    self.set_mode(name="default")
+                
                 return accumulated_content
 
         # print("[STOP] Max iterations reached. Terminating process.")
+        # Reset mode back to default if this was a /plan query
+        if is_plan_mode:
+            self.set_mode(name="default")
         return "Max iterations reached. Process terminated."
 
     def __del__(self):
