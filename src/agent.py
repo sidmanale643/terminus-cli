@@ -228,7 +228,8 @@ class Agent:
         is_plan_mode = user_message.strip().startswith("/plan")
         if is_plan_mode:
             self.set_mode(name = "plan")
-            user_message = user_message.replace("/plan", "", 1).strip()
+            task = user_message.replace("/plan", "", 1).strip()
+            user_message = f"Plan this feature {task}"
             
             # Notify user about mode switch
             if status_callback:
