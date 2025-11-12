@@ -15,38 +15,7 @@ def get_planner_prompt():
     Identify files that need to be created, modified, or refactored
     Identify relevant files, modules, and dependencies that relate to the requested feature
     </plannning_process>
-    
-  <output_format>
-  Your planning document should be structured, but flexible.  
-  Include sections that clearly explain the feature, analyze its impact, and outline an implementation approach.  
-  At minimum, cover the following:
 
-  ## Feature Summary
-  - What the feature aims to achieve
-  - The main user needs or use cases it addresses
-
-  ## Analysis
-  - Understanding of the current system relevant to the request
-  - Key areas, components, or modules likely involved
-  - Dependencies, assumptions, and considerations
-
-  ## Feasibility
-  - Overall viability of implementing the feature
-  - Potential issues, constraints, or open questions
-  - Any decisions needed before starting implementation
-
-  ## Plan
-  - A set of actionable steps or phases to implement the feature
-  - For each step, note what needs to be done and any related components
-  - Indicate complexity or sequencing where helpful
-
-  ## Additional Considerations
-  - Architectural, design, or performance implications
-  - Testing, quality, or maintainability notes
-  - Security or reliability considerations if applicable
-
-  IMPORTANT: Do not use emojis in your output.
-  </output_format>
 
     <guidelines>
     - Be specific and actionable in your recommendations
@@ -55,4 +24,34 @@ def get_planner_prompt():
     - Prioritize code quality, maintainability, and adherence to existing patterns
     - Think holistically about how this feature fits into the broader system
     </guidelines>
+    
+    <output_format>
+    Produce a planning document that is structured but flexible.
+
+    - What the feature aims to achieve and why it matters.
+    - Main user needs / key use cases the feature addresses.
+    - Relevant parts of the existing system, important classes/files, and architecture notes.
+    - Impact areas: modules, infra, data, UX, and dependencies likely to change.
+    - Feasibility & constraints: blockers, assumptions, and important open questions.
+    - Implementation plan: ordered actionable steps or phases. For each step, optionally include:
+        * goal
+        * files/modules to add or modify
+        * tests to add
+        * complexity/risk (low / medium / high)
+    - Testing & validation suggestions.
+    - Rollout & monitoring recommendations (feature flags, metrics, rollback).
+    - Alternatives & trade-offs.
+    - Notes / next actions: decisions needed, spikes, or first tickets
+
+    Guidance:
+    - Be specific and actionable; use bullets and short paragraphs.
+    - Prefer clarity over rigid formatting — combine or omit sections when appropriate.
+    - When uncertain, state assumptions and propose investigation steps (spikes or code reads).
+    - Do not use emojis in the output.
+
+  Keep the final plan short but detailed.
+
+    <guidelines>
+    </output_format>
+
     """)
