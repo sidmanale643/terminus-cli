@@ -10,6 +10,8 @@ class FileEditor(ToolSchema):
     RED = '\033[91m'
     GREEN = '\033[92m'
     CYAN = '\033[96m'
+    YELLOW = '\033[93m'
+    BOLD = '\033[1m'
     RESET = '\033[0m'
     
     def description(self):
@@ -19,6 +21,9 @@ class FileEditor(ToolSchema):
         1. 'content' - The EXACT original content of the file (read this from file_reader first)
         2. 'edited_content' - The NEW modified content you want to write to the file
         The tool will generate a diff comparing these two versions and write the edited_content to the file.
+
+        IMPORTANT: Never add emojis unless specifically asked to do so by the user.
+
         """)
     
     def json_schema(self):
@@ -49,44 +54,56 @@ class FileEditor(ToolSchema):
     }
     
     def format_colored_diff(self, diff_lines):
-        """Format diff with colors"""
+        """Format diff with colors and better readability"""
         result = []
         for line in diff_lines:
-            if line.startswith('+') and not line.startswith('+++'):
+            # Strip trailing whitespace for display but preserve the line content
+            line = line.rstrip()
+            
+            if line.startswith('---') or line.startswith('+++'):
+                # File headers in bold yellow
+                result.append(f"{self.BOLD}{self.YELLOW}{line}{self.RESET}")
+            elif line.startswith('+'):
+                # Additions in green
                 result.append(f"{self.GREEN}{line}{self.RESET}")
-            elif line.startswith('-') and not line.startswith('---'):
+            elif line.startswith('-'):
+                # Deletions in red
                 result.append(f"{self.RED}{line}{self.RESET}")
             elif line.startswith('@@'):
-                result.append(f"{self.CYAN}{line}{self.RESET}")
+                # Line numbers in cyan bold
+                result.append(f"{self.BOLD}{self.CYAN}{line}{self.RESET}")
             else:
+                # Context lines
                 result.append(line)
         return '\n'.join(result)
     
     def run(self, file_path : str, content : str, edited_content : str):
     
         try:
-            # Generate diff before writing
-            original_lines = content.splitlines(keepends=False)
-            edited_lines = edited_content.splitlines(keepends=False)
+            with open(file_path, 'r', encoding='utf-8') as f:
+                original_content = f.read()
+           
+            # Write the new content
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(edited_content)
+            
+            # Generate diff using splitlines for proper line-by-line comparison
+            original_lines = original_content.splitlines(keepends=True)
+            edited_lines = edited_content.splitlines(keepends=True)
             
             diff = list(difflib.unified_diff(
                 original_lines,
                 edited_lines,
                 fromfile=f"a/{file_path}",
                 tofile=f"b/{file_path}",
-                lineterm=''
+                lineterm='',
+                n=3  # 3 lines of context
             ))
-            
-            # Write the file
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(edited_content)
-            
-            # Format result for display
+
             if diff:
                 colored_diff = self.format_colored_diff(diff)
-                # Use visual separator without markdown code fence
-                separator = "─" * 60
-                result = f"File {file_path} has been edited successfully.\n\n{separator}\n{colored_diff}\n{separator}"
+                separator = "─" * 80
+                result = f"\n{self.BOLD}{self.GREEN}✓ File edited successfully:{self.RESET} {file_path}\n\n{separator}\n{colored_diff}\n{separator}\n"
             else:
                 result = f"File {file_path} has been edited (no changes detected in diff)."
             
