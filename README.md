@@ -1,117 +1,242 @@
-![Terminus CLI](assets/image.png)
-
 # Terminus CLI
 
-AI-powered CLI agent with intelligent automation for coding tasks, file operations, and development workflows.
+> AI-powered development companion for the command line
 
-![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![Terminus CLI](assets/image.png)
+
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-active-brightgreen.svg)](https://github.com/sidmanale643/terminus-cli)
+
+Terminus CLI is an AI-powered tool that automates coding tasks, manages files, and streamlines your development workflow directly from the command line.
+
+## Features
+
+- **Project Awareness**: Analyzes and understands your entire codebase structure
+- **Natural Language Interface**: Interact using plain English descriptions of tasks
+- **Intelligent File Operations**: Read, write, edit, and create files with AI guidance
+- **Codebase Search & Analysis**: Powerful search tools to find and analyze code patterns
+- **Multi-LLM Support**: Integrates with Groq, OpenRouter, and extensible for others
+- **Persistent Session Memory**: Retains context across interactions for efficient workflows
+- **Tool Ecosystem**: Built-in tools for linting, task management, and system commands
+- **Customizable Behavior**: Project-specific instructions via `terminus.md`
 
 ## Quick Start
+
+### Prerequisites
+- Python 3.11 or higher
+- [uv](https://docs.astral.sh/uv/) (recommended for fast dependency management; pip works too)
+
+### Installation
+
+#### Option 1: Global Install with pipx (Recommended)
+
+pipx provides isolated, system-wide access:
+
+```bash
+# Install pipx (if needed)
+# macOS: brew install pipx
+# Ubuntu: python3 -m pip install --user pipx
+pipx ensurepath
+
+# Install from GitHub
+pipx install git+https://github.com/sidmanale643/terminus-cli.git
+
+# Or from local directory (after cloning)
+# pipx install -e /path/to/local/terminus-cli
+```
+
+#### Option 2: Virtual Environment Setup (Development)
 
 ```bash
 git clone https://github.com/sidmanale643/terminus-cli.git
 cd terminus-cli
-uv venv && source .venv/bin/activate
-uv sync  # or: uv pip install -e .
-cp .env.sample .env  # Add your API keys
-python main.py
-```
 
-## API Keys
+# Create and activate virtual environment
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-Create `.env` file from the sample:
-```bash
+# Install dependencies
+uv sync
+
+# Install in editable mode
+uv pip install -e .
+
+# Setup environment file
 cp .env.sample .env
+# Edit .env with your API keys (see below)
 ```
 
-Then edit `.env` with your API keys:
+To run: `terminus` (if installed) or `python -m src.main`.
+
+### Configuration
+
+Create or edit `.env` in your project root or home directory:
+
 ```env
-GROQ_API_KEY=your_groq_api_key_here              # Primary LLM (default provider)
-OPEN_ROUTER_API_KEY=your_openrouter_api_key_here  # Alternative LLM provider
+# Required for LLM access
+GROQ_API_KEY=your_groq_key_here
+OPENROUTER_API_KEY=your_openrouter_key_here
+
+# Optional: Default model
+DEFAULT_MODEL=groq/llama3-8b-8192  # Or openrouter/model-name
 ```
 
-Get keys: [Groq](https://groq.com) | [OpenRouter](https://openrouter.ai)
+Obtain keys from:
+- [Groq Console](https://console.groq.com/keys)
+- [OpenRouter](https://openrouter.ai/keys)
 
-## Usage
+## Usage Examples
 
-**Interactive mode:**
+### Starting Terminus
+
+Navigate to your project and launch:
+
 ```bash
-uv run main.py
+cd /path/to/your/project
+terminus
 ```
 
-**Single query:**
+This opens an interactive session where Terminus uses the current directory as context.
+
+### Interactive Session
+
 ```bash
-uv run main.py "List Python files in current directory"
+terminus> List all Python files in the src directory
+terminus> Explain how the agent.py file works
+terminus> Add a new function to utils.py for data validation
 ```
 
-**Available Commands:**
-- `/help` - Display help information
-- `/context` - View current conversation context
-- `/history` - View recent session history
-- `/reset` - Reset session history
-- `/context_size` - Display context usage
-- `/clear` - Clear console screen
-- `/exit` - Exit the program (also: `exit`, `quit`, `q`)
+### One-Shot Queries
 
-## Tools
+For single commands without interactive mode:
 
-- **Command execution** - Run shell commands
-- **File operations** - Create, read, edit files
-- **Grep search** - Search through files
-- **Directory listing** - Browse file structure
-- **Linting** - Code quality checks
-- **Task management** - Track todos
-- **Sub-agent delegation** - Delegate complex tasks
+```bash
+terminus "Search for unused imports in the codebase"
+terminus "Generate a unit test for the login function in auth.py"
+```
 
-## Architecture
+### Referencing Files
+
+Use `@` to point to specific files:
+
+```bash
+terminus "Optimize the code in @src/agent.py"
+terminus "Document the classes in @src/models/schema.py"
+```
+
+## Built-in Commands
+
+Available in interactive mode:
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Display help and available commands |
+| `/context` | Show current session context |
+| `/history` | View conversation history |
+| `/reset` | Reset context and start over |
+| `/exit` | Exit the application |
+| `/todo` | View or manage task lists |
+
+### Custom Instructions with `terminus.md`
+
+Tailor Terminus behavior per project by creating `terminus.md` in the root:
+
+```markdown
+# Project-Specific Instructions
+
+## Coding Standards
+- Use type hints everywhere (PEP 484)
+- Adhere to PEP 8 formatting
+- Prefer async patterns for I/O operations
+
+## Preferences
+- Avoid global variables
+- Use existing dependencies from pyproject.toml
+- Prioritize security in file operations
+```
+
+Terminus loads this file automatically, incorporating instructions into its responses.
+
+## Architecture Overview
 
 ```
 terminus-cli/
-├── main.py              # CLI interface & entry point
-├── pyproject.toml       # Project configuration
-├── uv.lock              # Dependency lock file
-├── .env.sample          # Environment variables template
-├── README.md            # Documentation
-├── assets/              # Static assets
-│   └── image.png        # Project logo
-├── notebooks/           # Development notebooks
-│   ├── db.ipynb         # Database experiments
-│   ├── streaming.ipynb  # Streaming functionality
-│   ├── testing.ipynb    # Testing experiments
-│   └── test_streaming.py # Streaming tests
-├── ui/                  # User interface components
-│   ├── frontend.py      # Rich-based CLI UI
-│   └── completer.py     # Command completion
-└── src/                 # Source code
-    ├── agent.py         # Core agent logic & orchestration
-    ├── session_manager.py # Session & history management
-    ├── constants.py     # Configuration constants
-    ├── utils.py         # Utility functions
-    ├── llm_service/     # LLM provider integrations
-    │   ├── service.py   # LLM service manager
-    │   ├── groq.py      # Groq provider
-    │   ├── openrouter.py # OpenRouter provider
-    │   └── base_class.py # Base provider interface
-    ├── models/          # Data models
-    │   ├── llm.py       # LLM models
-    │   └── tool.py      # Tool models
-    ├── tools/           # Tool implementations
-    │   ├── __init__.py  # Tool package init
-    │   ├── tool_registry.py # Tool registration
-    │   ├── cmd_executor.py  # Command execution
-    │   ├── create_file.py   # File creation
-    │   ├── edit_file.py     # File editing
-    │   ├── read_file.py     # File reading
-    │   ├── read_multiple_files.py # Multiple file reading
-    │   ├── grep.py          # Search functionality
-    │   ├── ls.py            # Directory listing
-    │   ├── lint.py          # Code linting
-    │   ├── todo.py          # Task management
-    │   ├── subagent.py      # Sub-agent delegation
-    │   └── web_search.py    # Web search functionality
-    └── prompts/         # System prompts & templates
-        ├── __init__.py  # Prompts package init
-        ├── manager.py       # Prompt management
-        ├── system_prompt.py # Core system prompt
-        └── sub_agent.py     # Sub-agent prompts
+├── pyproject.toml      # Dependencies and build config
+├── src/
+│   ├── main.py         # CLI entry point
+│   ├── agent.py        # Core AI agent logic
+│   ├── tools/          # Tool definitions (file I/O, search, exec, etc.)
+│   ├── llm_service/    # LLM client integrations
+│   ├── models/         # Pydantic models for data handling
+│   └── utils/          # Shared utilities
+├── ui/                 # Terminal interface (prompts, output formatting)
+├── tests/              # Unit and integration tests
+├── notebooks/          # Exploratory Jupyter notebooks
+├── README.md           # Documentation
+└── .env.sample         # Config template
 ```
+
+The agent uses a tool-calling architecture, delegating tasks to specialized functions for safe, precise operations.
+
+## Development Guide
+
+### Running the Application
+
+- Interactive: `terminus`
+- Debug: `python -m src.main --debug`
+
+### Testing
+
+```bash
+uv run pytest tests/
+uv run pytest --cov src/
+```
+
+### Linting and Formatting
+
+Ruff is configured in `pyproject.toml`:
+
+```bash
+# Check
+uv run ruff check .
+
+# Format
+uv run ruff format .
+
+# Lint and auto-fix
+uv run ruff check --fix .
+```
+
+### Adding Tools or Features
+
+1. Implement in `src/tools/`
+2. Register in `agent.py`
+3. Add tests in `tests/`
+4. Update README if user-facing
+
+## Contributing
+
+We welcome contributions! Please:
+
+1. Fork the repo and create a feature branch
+2. Ensure code passes linting and tests
+3. Update documentation
+4. Submit a PR with a clear description
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details (create if needed).
+
+## License
+
+This project is licensed under the MIT License - see [LICENSE](LICENSE).
+
+## Support and Feedback
+
+- **Issues**: [GitHub Issues](https://github.com/sidmanale643/terminus-cli/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/sidmanale643/terminus-cli/discussions)
+- **In-App**: Type `/help` for quick assistance
+- **Feedback**: Report at the issues page above
+
+---
+
+Terminus CLI: Empowering CLI-driven development with AI intelligence.
