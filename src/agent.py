@@ -300,7 +300,13 @@ class Agent:
                     status_callback(status_message, is_thinking=False)
 
                 try:
-                    tool_output = self.tool_registry.run_tool(tool_call.function.name, **tool_args)
+                    # Pass status_callback to tools that support it
+                    # Only pass to specific tools that accept this parameter
+                    tools_supporting_callback = ['file_editor', 'command_executor']
+                    tool_kwargs = {**tool_args}
+                    if status_callback and tool_call.function.name in tools_supporting_callback:
+                        tool_kwargs['status_callback'] = status_callback
+                    tool_output = self.tool_registry.run_tool(tool_call.function.name, **tool_kwargs)
                     # print(f"[TOOL] Tool '{tool_call.function.name}' executed successfully.")
                     
                     # If this is a todo tool call, display the todo list
@@ -315,12 +321,8 @@ class Agent:
                     # Note: accumulated_content was already streamed during the loop above
                     # No need to send it again via streaming_callback as it would duplicate content
                     
-                    # Display tool output for file_editor in a separate callback (not in markdown)
-                    # This allows proper rendering of ANSI-colored diffs
-                    if tool_call.function.name == "file_editor" and status_callback:
-                        status_callback(tool_output, is_thinking=False, is_tool_output=True)
-                    elif streaming_callback and tool_call.function.name in ["file_creator"]:
-                        # For file_creator, add to streaming output
+                    # For file_creator, add to streaming output
+                    if streaming_callback and tool_call.function.name in ["file_creator"]:
                         streaming_callback("\n\n")
                         streaming_callback(tool_output)
                     
