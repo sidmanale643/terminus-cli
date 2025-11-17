@@ -25,6 +25,9 @@ class TodoManager(ToolSchema):
         - When you are tracking the progress of a task
         - When you are managing a list of tasks
         - When you are tracking the progress of a task
+
+        Instead of creating a list one by one, try to create an array of tasks at the beginning and then append new tasks later as required.
+
         """)
 
     def json_schema(self):
