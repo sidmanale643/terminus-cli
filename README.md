@@ -199,20 +199,6 @@ uv run pytest tests/
 uv run pytest --cov src/
 ```
 
-### Linting and Formatting
-
-Ruff is configured in `pyproject.toml`:
-
-```bash
-# Check
-uv run ruff check .
-
-# Format
-uv run ruff format .
-
-# Lint and auto-fix
-uv run ruff check --fix .
-```
 
 ### Adding Tools or Features
 
