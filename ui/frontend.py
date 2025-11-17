@@ -361,6 +361,10 @@ class StreamingHandler:
         self.todo_live_display = None
         self.current_todos = []
     
+    def get_user_input(self, prompt: str) -> str:
+       
+        return self.console.input(prompt)
+    
     def start(self):
         """Start the status spinner"""
         self.status = self.console.status(
@@ -389,8 +393,8 @@ class StreamingHandler:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
     
-    def update_status(self, message: str, is_thinking: bool = False, is_tool_output: bool = False):
-        """Callback to update status message"""
+    def update_status(self, message: str, is_thinking: bool = False, is_tool_output: bool = False, keep_stopped: bool = False):
+      
         # Stop live display if active
         if self.live_display is not None:
             self.live_display.stop()
@@ -412,7 +416,9 @@ class StreamingHandler:
                 ),
                 justify="center"
             )
-            self.status.start()
+            # Only restart status if not waiting for user input
+            if not keep_stopped:
+                self.status.start()
         elif is_thinking:
             # Only display thinking if there's actual content (not empty or whitespace)
             if message and message.strip():
