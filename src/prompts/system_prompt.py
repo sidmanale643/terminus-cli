@@ -7,10 +7,6 @@ def get_system_prompt(cwd=None):
     if cwd is None:
         cwd = os.getcwd()
     
-    if os.path.exists(f"{cwd}/terminus.md"):
-        with open(f"{cwd}/terminus.md", 'r') as f:
-            user_instructions = f.read()
-    
     date = datetime.now().strftime("%Y-%m-%d")
 
     system_prompt =  dedent(f"""
@@ -88,7 +84,10 @@ def get_system_prompt(cwd=None):
 
     """)
 
-    if user_instructions:
+    if os.path.exists(f"{cwd}/terminus.md"):
+        with open(f"{cwd}/terminus.md", 'r') as f:
+            user_instructions = f.read()
+    
         system_prompt += f"""
         CUSTOM USER INSTRUCTIONS
         {user_instructions}
