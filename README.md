@@ -163,18 +163,24 @@ Terminus loads this file automatically, incorporating instructions into its resp
 ```
 terminus-cli/
 ├── pyproject.toml      # Dependencies and build config
+├── uv.lock             # Lockfile for dependencies
 ├── src/
-│   ├── main.py         # CLI entry point
+│   ├── __init__.py
 │   ├── agent.py        # Core AI agent logic
+│   ├── constants.py    # Constants and configurations
+│   ├── main.py         # CLI entry point
+│   ├── session_manager.py  # Session management
 │   ├── tools/          # Tool definitions (file I/O, search, exec, etc.)
 │   ├── llm_service/    # LLM client integrations
 │   ├── models/         # Pydantic models for data handling
+│   ├── prompts/        # Prompt templates
 │   └── utils/          # Shared utilities
 ├── ui/                 # Terminal interface (prompts, output formatting)
-├── tests/              # Unit and integration tests
 ├── notebooks/          # Exploratory Jupyter notebooks
+├── assets/             # Project assets (images, etc.)
 ├── README.md           # Documentation
-└── .env.sample         # Config template
+├── .env.sample         # Config template
+└── .gitignore          # Git ignore patterns
 ```
 
 The agent uses a tool-calling architecture, delegating tasks to specialized functions for safe, precise operations.
