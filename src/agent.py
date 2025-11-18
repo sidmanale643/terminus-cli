@@ -165,6 +165,10 @@ class Agent:
             filename = tool_args["file_path"].split('/')[-1]
             return f"editing {filename}"
         
+        elif tool_name == "multi_edit" and "file_path" in tool_args:
+            filename = tool_args["file_path"].split('/')[-1]
+            return f"performing multuple edits in {filename}"
+        
         elif tool_name == "multiple_file_reader" and "file_paths" in tool_args:
             count = len(tool_args["file_paths"])
             return f"reading {count} file{'s' if count > 1 else ''}"
@@ -174,7 +178,7 @@ class Agent:
             return f"searching for '{pattern}'"
         
         elif tool_name == "command_executor" and "command" in tool_args:
-            cmd = tool_args["command"].split()[0]  # Get first word of command
+            cmd = tool_args["command"]  # Get first word of command
             return f"executing {cmd}"
         
         elif tool_name == "ls" and "directory" in tool_args:

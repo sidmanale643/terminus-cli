@@ -8,6 +8,7 @@ from .read_multiple_files import MultipleFileReader
 from .subagent import SubAgent
 from .ls import Ls
 from .lint import Lint
+from .multi_edit import MultiEdit
 
 __all__ = [
     "Grep",
@@ -20,4 +21,5 @@ __all__ = [
     "Ls",
     "SubAgent",
     "Lint",
+    "MultiEdit"
 ]
