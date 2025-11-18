@@ -1,4 +1,4 @@
-from src.tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator, FileEditor, MultipleFileReader, Ls, SubAgent, Lint
+from src.tools import Grep, FileReader, CommandExecutor, TodoManager, FileCreator, FileEditor, MultipleFileReader, Ls, SubAgent, Lint, MultiEdit, WebSearch
 
 class ToolRegistry:
     def __init__(self):
@@ -21,6 +21,7 @@ class ToolRegistry:
         self.register_tool(Ls().name, Ls())
         self.register_tool(SubAgent().name, SubAgent())
         self.register_tool(Lint().name, Lint())
+        self.register_tool(MultiEdit().name, MultiEdit())
         
     def generate_tool_schemas(self):
         self.tool_schemas = [tool.json_schema() for tool in self.tool_box.values()]
