@@ -1,7 +1,7 @@
 from textwrap import dedent
 from src.models.tool import ToolSchema
 import subprocess
-from typing import Dict, Any
+from typing import Dict, Any, Callable, Optional
 
 class CommandExecutor(ToolSchema):
     """
@@ -61,9 +61,16 @@ class CommandExecutor(ToolSchema):
         }
     }
 
-    def run(self, command: str, cwd: str = None) -> Dict[str, Any]:
+    def run(
+        self,
+        command: str,
+        cwd: str = None,
+        status_callback: Optional[Callable[..., Any]] = None
+    ) -> Dict[str, Any]:
 
         try:
+            if status_callback:
+                status_callback(f"executing `{command}`", is_thinking=False)
             result = subprocess.run(
                 command,
                 shell=True,
