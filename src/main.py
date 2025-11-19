@@ -4,25 +4,73 @@ from src.utils import process_file_references
 import sys
 import os
 import json
+from src.models.llm import available_models
+
+
 
 class TerminusCLI:
-    """Main CLI application - handles business logic and orchestration"""
-    
+
     def __init__(self, cwd=None):
-        """
-        Initialize Terminus CLI
-        
-        Args:
-            cwd: Optional working directory to use as the project root. 
-                 If None, uses the current working directory.
-        """
-        # Set the working directory if provided
+
         if cwd:
             os.chdir(cwd)
         
         self.agent = Agent(cwd=cwd)
         self.display = TerminalDisplay()
-        
+    
+    def display_available_models(self):
+        self.display.render_table()
+
+    # add at top of file (already imported earlier in your snippet)
+
+    # helper to resolve a model by index or name (case-insensitive)
+    def resolve_model(self, spec: str):
+        """
+        spec: either an integer index (1-based) or a substring/name of model.name/provider.
+        Returns model instance or raises ValueError.
+        """
+        spec = spec.strip()
+        # try index (1-based)
+        if spec.isdigit():
+            idx = int(spec) - 1
+            if 0 <= idx < len(available_models):
+                m = available_models[idx]
+                return m() if isinstance(m, type) else m
+            raise ValueError(f"Model index {spec} out of range (1..{len(available_models)})")
+
+        # try exact name match (case-insensitive)
+        lowered = spec.lower()
+        matches = []
+        for m in available_models:
+            inst = m() if isinstance(m, type) else m
+            if inst.name.lower() == lowered or inst.provider.lower() == lowered:
+                return inst
+            # partial match
+            if lowered in inst.name.lower() or lowered in inst.provider.lower():
+                matches.append(inst)
+
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            names = ", ".join([f"{i+1}:{x.name}" for i,x in enumerate(matches)])
+            raise ValueError(f"Multiple models match '{spec}': {names}")
+
+        raise ValueError(f"No model found matching '{spec}'")
+
+    # update TerminusCLI.switch_model signature (optional but clearer)
+    def switch_model(self, model_spec: str):
+        """
+        model_spec: model name, provider, or 1-based index (string)
+        """
+        try:
+            model_inst = self.resolve_model(model_spec)
+            # call agent API (assumes agent.switch_model accepts an instance — adjust if it expects a name)
+            self.agent.switch_model(model_inst)
+            self.display.print_message(f"[green]Switched model to[/green] [bold]{model_inst.name}[/bold]")
+        except Exception as e:
+            self.display.print_message(f"[red]Failed to switch model:[/] {e}")
+
+    
     def process_query(self, user_input: str):
         """Process user query and coordinate with agent and display"""
         try:
@@ -54,6 +102,11 @@ class TerminusCLI:
             
             # Render final response after live display stops to keep content visible
             handler.render_final_response(response)
+            
+            # Display request cost if available
+            if self.agent.last_request_cost is not None:
+                cost_str = f"${self.agent.last_request_cost:.6f}"
+                self.display.print_message(f"[dim bright_green]Request cost: {cost_str}[/dim bright_green]")
             
             # Display footer with context info
             self.display.render_footer(
@@ -94,21 +147,109 @@ class TerminusCLI:
             self.display.print_message(f"Context Size: {self.agent.context_size}")
             return True
         
-        # Display history
+        if command.lower() == '/list_models':
+            self.display_available_models()
+            return True
+
+          # replace the /switch branch inside execute_command with this:
+        import re
+
+        if command.lower().startswith('/switch'):
+            parts = command.split(maxsplit=1)
+
+            # prefer normalized list if present
+            models = getattr(self, "available_models", available_models)
+
+            # immediate switch if an argument is provided with the command
+            if len(parts) == 2:
+                model_spec = parts[1]
+                self.switch_model(model_spec)
+                return True
+
+            # no arg supplied — show usage and prompt inline
+            self.display.print_message("[yellow]Usage:[/] /switch <model-name-or-index>")
+            for i, m in enumerate(models, start=1):
+                inst = m() if isinstance(m, type) else m
+                self.display.print_message(f"  {i}. {inst.name} ({inst.provider})")
+
+            try:
+                self.display.print_message("[dim]Type the number or name of the model to switch, or press Enter to cancel.[/dim]")
+                # IMPORTANT: call get_user_input() without 'prompt' keyword (your implementation doesn't accept it)
+                selection = self.display.get_user_input().strip()
+
+                # cancel if empty
+                if not selection:
+                    self.display.print_message("[dim]Switch cancelled.[/dim]")
+                    return True
+
+                # sanitize stray symbols but keep model-relevant chars like / : . _ -
+                selection_clean = re.sub(r"[^0-9A-Za-z/_\:\.\-]", "", selection).strip()
+
+                # if number -> index (1-based)
+                if selection_clean.isdigit():
+                    idx = int(selection_clean) - 1
+                    if 0 <= idx < len(models):
+                        m = models[idx]
+                        inst = m() if isinstance(m, type) else m
+                        self.agent.switch_model(inst)
+                        self.display.print_message(f"[green]Switched model to[/green] [bold]{inst.name}[/bold]")
+                        return True
+                    else:
+                        self.display.print_message(f"[red]Index {selection} out of range.[/red]")
+                        return True
+
+                # else try name/provider matches (case-insensitive, partial)
+                sel_lower = selection_clean.lower()
+                matches = []
+                for m in models:
+                    inst = m() if isinstance(m, type) else m
+                    if inst.name.lower() == sel_lower or inst.provider.lower() == sel_lower:
+                        matches = [inst]
+                        break
+                    if sel_lower in inst.name.lower() or sel_lower in inst.provider.lower():
+                        matches.append(inst)
+
+                if len(matches) == 1:
+                    chosen = matches[0]
+                    self.agent.switch_model(chosen)
+                    self.display.print_message(f"[green]Switched model to[/green] [bold]{chosen.name}[/bold]")
+                    return True
+                elif len(matches) > 1:
+                    self.display.print_message("[yellow]Multiple matches found:[/yellow]")
+                    for i, inst in enumerate(matches, start=1):
+                        self.display.print_message(f"  {i}. {inst.name} ({inst.provider})")
+                    self.display.print_message("[dim]Try a more specific name or use the index.[/dim]")
+                    return True
+                else:
+                    self.display.print_message(f"[red]No models matched '{selection}'.[/red]")
+                    return True
+
+            except KeyboardInterrupt:
+                self.display.print_message("\n[bright_red]Switch cancelled by user[/bright_red]")
+                return True
+            except Exception as e:
+                self.display.print_message(f"[red]Error while switching model:[/] {e}")
+                return True
+
+                # Display history
         if command.lower() == '/history':
             self._display_history()
             return True
-        
-        # Display help
+                
+                # Display help
         if command.lower() == '/help':
             self.display.render_help()
             return True
-        
-        # Display context
+                
+                # Display context
         if command.lower() == '/context':
             self.display.print_message(str(self.agent.context))
             return True
         
+        if command.lower() == '/model':
+            self.display.print_message(f"Current Model: {self.agent.model}")
+            return True
+                
         return True
     
     def _display_history(self):
