@@ -1,4 +1,6 @@
 from typing import Literal
+
+from src.models.llm import available_models
 from src.tools.tool_registry import ToolRegistry
 import json
 from src.prompts import PromptManager
@@ -30,6 +32,7 @@ class Agent:
         self.iteration = 0
         self.max_iterations = MAX_ITERATIONS
         self.prompt_manager = PromptManager(cwd=cwd)
+        self.available_models = available_models
         self.system_prompt = self.prompt_manager.get_system_prompt()
         self.planner_prompt = self.prompt_manager.get_planner_prompt()
         
@@ -39,6 +42,7 @@ class Agent:
         
         self.tool_registry = ToolRegistry()
         self.model = DEFAULT_MODEL
+        self.last_request_cost = None  # Track cost of last request
         
         self.session_manager = SessionHistory()
         # print("[INIT] Session manager initialized.")
@@ -76,6 +80,12 @@ class Agent:
         message = {"role": "user", "content": content}
         self.context.append(message)
         self.session_manager.insert_to_session_history("user", json.dumps(message))
+
+    def switch_model(self, model):
+
+        if model not in self.available_models:
+            return ValueError("Select the correct model")
+        self.model = model.name
     
     def add_assistant_message(self, content, tool_calls=None):
 
@@ -306,7 +316,7 @@ class Agent:
                 try:
                     # Pass status_callback to tools that support it
                     # Only pass to specific tools that accept this parameter
-                    tools_supporting_callback = ['file_editor', 'command_executor']
+                    tools_supporting_callback = ['file_editor']
                     tool_kwargs = {**tool_args}
                     if status_callback and tool_call.function.name in tools_supporting_callback:
                         tool_kwargs['status_callback'] = status_callback
