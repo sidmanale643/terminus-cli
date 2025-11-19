@@ -1,3 +1,4 @@
+from src.models.llm import available_models
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -7,7 +8,7 @@ from rich.table import Table
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style as PTStyle
 from ui.completer import TerminusCompleter
-
+from rich.align import Align
 
 class TerminalDisplay:
     """Handles all UI rendering and display logic"""
@@ -65,6 +66,9 @@ class TerminalDisplay:
             ("/reset", "Reset session history"),
             ("/context_size", "Display context size"),
             ("/clear", "Clear console screen"),
+            ("/switch <model>", "Switch to a different AI model"),
+            ("/list_models", "List available models"),
+            ("/model", "Show current model"),
             ("/exit", "Exit the program"),
         ]
 
@@ -259,6 +263,30 @@ class TerminalDisplay:
             )
         )
     
+
+    def render_table(self):
+        table = Table(title="Available Models")
+
+        table.add_column("Model Name", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Provider", style="magenta")
+        table.add_column("Context Size", style="red", justify="right")
+        table.add_column("Input Tokens Pricing", justify="right", style="green")
+        table.add_column("Output Tokens Pricing", justify="right", style="green")
+
+        for model in available_models:
+
+            inst = model() if isinstance(model, type) else model
+
+            name = str(inst.name)
+            provider = str(inst.provider)
+            context_size = f"{int(inst.context_size):,}"           
+            input_price = f"${float(inst.input_tokens_pricing):.4g}" 
+            output_price = f"${float(inst.output_tokens_pricing):.4g}"
+
+            table.add_row(name, provider, context_size, input_price, output_price)
+
+        self.console.print(Align.center(table))
+
     def clear_screen(self):
         """Clear the console"""
         self.console.clear()
