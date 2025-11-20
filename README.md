@@ -12,14 +12,14 @@ Terminus CLI is an AI-powered tool that automates coding tasks, manages files, a
 
 ## Features
 
-- **Project Awareness**: Analyzes and understands your entire codebase structure
-- **Natural Language Interface**: Interact using plain English descriptions of tasks
-- **Intelligent File Operations**: Read, write, edit, and create files with AI guidance
-- **Codebase Search & Analysis**: Powerful search tools to find and analyze code patterns
-- **Multi-LLM Support**: Integrates with Groq, OpenRouter, and extensible for others
-- **Persistent Session Memory**: Retains context across interactions for efficient workflows
-- **Tool Ecosystem**: Built-in tools for linting, task management, and system commands
-- **Customizable Behavior**: Project-specific instructions via `terminus.md`
+- **Codebase Understanding**: Scans your entire codebase to provide context-aware suggestions and understand complex project structures
+- **Natural Language Tasks**: Describe tasks in plain English—Terminus interprets and executes them seamlessly
+- **File Operations**: AI-guided reading, editing, creation, and refactoring of files with precision and safety
+- **Code Search**: Ripgrep-powered search to locate patterns, dependencies, and issues across your project
+- **LLM Integration**: Supports Groq, OpenRouter, and custom LLMs for tailored performance and cost efficiency
+- **Session Memory**: Maintains conversation history and context for multi-step development tasks without restarting
+- **Built-in Tools**: Includes linting with Ruff, task tracking, and secure system command execution
+- **Project Customization**: Adapts behavior via `terminus.md` files for coding standards, preferences, and workflows
 
 ## Quick Start
 
@@ -136,7 +136,11 @@ Available in interactive mode:
 | `/history` | View conversation history |
 | `/reset` | Reset context and start over |
 | `/exit` | Exit the application |
-| `/todo` | View or manage task lists |
+| `/clear` | Clear the screen |
+| `/context_size` | Display current context size |
+| `/list_models` | List available models |
+| `/switch` | Switch to a different model |
+| `/model` | Show current model |
 
 ### Custom Instructions with `terminus.md`
 
