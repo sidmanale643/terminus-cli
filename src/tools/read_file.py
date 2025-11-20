@@ -49,7 +49,7 @@ class FileReader(ToolSchema):
         if file_content.returncode != 0:
             error_msg = file_content.stderr.strip()
             if "No such file or directory" in error_msg:
-                return f"File does not exist"
+                return "File does not exist"
             return f"Error reading file: {error_msg or 'Unknown error.'}"
 
         if not file_content.stdout.strip():
