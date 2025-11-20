@@ -8,6 +8,8 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 import requests
 from dotenv import load_dotenv
+from textwrap import dedent
+from src.models.tool import ToolSchema
 
 # Load environment variables
 load_dotenv()
