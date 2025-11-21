@@ -16,7 +16,7 @@ class MultiEdit:
         return {
         "type": "function",
         "function": {
-            "name": self.name, 
+            "name": self.name,
             "description": self.description(),
             "parameters": {
                 "type": "object",
@@ -27,24 +27,27 @@ class MultiEdit:
                     },
                     "old_strings": {
                         "type": "array",
-                        "description": "the old string to replace"
+                        "items": {"type": "string"},
+                        "description": "the old strings to replace"
                     },
-                    "new_string": {
+                    "new_strings": {
                         "type": "array",
-                        "description": "the new string to replace the old string with"
+                        "items": {"type": "string"},
+                        "description": "the new strings to replace the old strings with"
                     },
                 },
-                "required": ["file_path", "old_string", "new_string"]
+                "required": ["file_path", "old_strings", "new_strings"]
             }
         }
     }
+
     
 
-    def run(self, file_path, old_string = List[str], new_string = List[str]):
-
-        for old_string, new_string in zip(old_string, new_string):
-            self.file_editor.run(file_path= file_path, old_string = old_string, new_string= new_string)
+    def run(self, file_path: str, old_strings: List[str], new_strings: List[str]):
         
-        return "All edits were succesful"
+        for old_string, new_string in zip(old_strings, new_strings):
+            self.file_editor.run(file_path=file_path, old_string=old_string, new_string=new_string)
+        return "All edits were successful"
+
 
 
