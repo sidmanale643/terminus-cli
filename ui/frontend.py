@@ -1,5 +1,6 @@
 from src.models.llm import available_models
 from rich.console import Console, Group
+from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
@@ -7,6 +8,7 @@ from rich.live import Live
 from rich.table import Table
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style as PTStyle
+from prompt_toolkit.formatted_text import FormattedText
 from ui.completer import TerminusCompleter
 from rich.align import Align
 
@@ -15,14 +17,23 @@ class TerminalDisplay:
     
     def __init__(self):
         self.console = Console()
+        self.colors = {
+            "accent": "#8B5CF6",
+            "accent_alt": "#22D3EE",
+            "muted": "#9CA3AF",
+            "success": "#34D399",
+            "warning": "#F59E0B",
+            "danger": "#F43F5E",
+        }
         
         # Initialize prompt_toolkit session with completer
         self.completer = TerminusCompleter()
         
         # Define prompt style for prompt_toolkit
         self.prompt_style = PTStyle.from_dict({
-            'prompt': '#FF0000 bold',  # bright red
-            'brackets': '#FF0000',      # bright red
+            'prompt': f"{self.colors['accent']} bold",
+            'brackets': self.colors['accent_alt'],
+            'path': self.colors['muted'],
         })
         
         self.prompt_session = PromptSession(
@@ -43,19 +54,15 @@ class TerminalDisplay:
    ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝
 """
         
-        self.console.print(banner, style="bold bright_red on black", justify="center")
+        banner_text = Text(banner, style=f"bold {self.colors['accent']}")
         
         # Create welcome header
         header = Text(justify="center")
-        header.append("Welcome to ", style="white")
-        header.append("TERMINUS CLI", style="bold bright_red")
-        header.append("\n\n", style="white")
-        header.append("Tip: Type ", style="dim white")
-        header.append("@", style="bright_cyan")
-        header.append(" and press ", style="dim white")
-        header.append("Tab", style="bright_yellow")
-        header.append(" for file suggestions\n", style="dim white")
-        header.append("\nQuick Commands:\n", style="bold white")
+        header.append("Welcome to ", style=f"bold {self.colors['muted']}")
+        header.append("TERMINUS CLI", style=f"bold {self.colors['accent']}")
+        header.append("\n", style=self.colors["muted"])
+        header.append("Calmer terminal UI for focused building.\n", style=f"dim {self.colors['muted']}")
+        header.append("\nQuick Commands\n", style=f"bold {self.colors['accent_alt']}")
 
         # Commands table
         commands = [
@@ -72,36 +79,48 @@ class TerminalDisplay:
             ("/exit", "Exit the program"),
         ]
 
-        table = Table(show_header=False, box=None, pad_edge=False)
-        table.add_column("Command", style="bright_red", no_wrap=True)
+        table = Table(
+            show_header=False,
+            box=box.SIMPLE_HEAD,
+            pad_edge=False,
+            expand=False,
+            padding=(0, 1),
+        )
+        table.add_column("Command", style=self.colors["accent"], no_wrap=True)
         table.add_column("Description", style="white")
+        table.row_styles = [f"dim {self.colors['muted']}", "white"]
 
         for cmd, desc in commands:
             table.add_row(cmd, desc)
 
         self.console.print(
             Panel(
-                Group(header, table),
-                border_style="bright_red on black",
+                Group(Align.center(banner_text), header, table),
+                border_style=self.colors["accent"],
                 padding=(1, 2),
-                expand=False
+                expand=False,
+                subtitle="[dim]Type @ then Tab for file suggestions",
+                subtitle_align="right",
             ),
             justify="center"
         )
     
     def get_user_input(self):
         """Get user input with enhanced prompt styling and autocomplete"""
-        # Display the prompt using rich for styling
         prompt_text = Text()
-        prompt_text.append("┌─[", style="bright_red")
-        prompt_text.append("TERMINUS", style="bold bright_red")
-        prompt_text.append("]", style="bright_red")
+        prompt_text.append("╭─ ", style=self.colors["accent"])
+        prompt_text.append("TERMINUS", style=f"bold {self.colors['accent_alt']}")
+        prompt_text.append("  ready", style=f"dim {self.colors['muted']}")
         self.console.print(prompt_text)
         
         # Use prompt_toolkit for input with autocomplete
         # Format: └─> 
         try:
-            user_input = self.prompt_session.prompt("└─> ")
+            prompt_message = FormattedText([
+                ("class:brackets", "╰─"),
+                ("class:prompt", "› "),
+            ])
+            user_input = self.prompt_session.prompt(prompt_message)
             return user_input
         except (KeyboardInterrupt, EOFError):
             raise KeyboardInterrupt()
@@ -109,15 +128,15 @@ class TerminalDisplay:
     def create_progress_bar(self, context_percent: float, bar_width: int = 25):
         """Create a colored progress bar based on context usage"""
         filled = int((context_percent / 100) * bar_width)
-        bar = "█" * filled + "░" * (bar_width - filled)
+        bar = "█" * filled + "·" * (bar_width - filled)
         
         # Color based on usage
         if context_percent < 50:
-            color = "bright_green"
+            color = self.colors["success"]
         elif context_percent < 80:
-            color = "bright_yellow"
+            color = self.colors["warning"]
         else:
-            color = "bright_red"
+            color = self.colors["danger"]
         
         return bar, color
     
@@ -128,16 +147,18 @@ class TerminalDisplay:
         
         # Left side - CWD
         left_text = Text()
-        left_text.append(cwd, style="bright_cyan")
+        left_text.append("cwd ", style=f"dim {self.colors['muted']}")
+        left_text.append(cwd, style=self.colors["accent_alt"])
         
         # Right side - Model and Context
         right_text = Text()
-        right_text.append(model, style="bright_magenta")
-        right_text.append(" | ", style="dim white")
-        right_text.append("Context: ", style="bold blue")
-        right_text.append("[", style="dim white")
+        right_text.append("model ", style=f"dim {self.colors['muted']}")
+        right_text.append(model, style=f"bold {self.colors['accent']}")
+        right_text.append("   ", style=f"dim {self.colors['muted']}")
+        right_text.append("context ", style=f"dim {self.colors['muted']}")
+        right_text.append("[", style=f"dim {self.colors['muted']}")
         right_text.append(bar, style=color)
-        right_text.append("] ", style="dim white")
+        right_text.append("] ", style=f"dim {self.colors['muted']}")
         right_text.append(f"{context_percent:.1f}%", style=color)
         
         # Create a combined layout
@@ -154,8 +175,8 @@ class TerminalDisplay:
         self.console.print(
             Panel(
                 md,
-                title="[bold bright_red on black]Response[/bold bright_red on black]",
-                border_style="bright_red on black",
+                title=f"[bold {self.colors['accent']}]Response[/bold {self.colors['accent']}]",
+                border_style=self.colors["accent"],
                 padding=(1, 2)
             )
         )
@@ -164,24 +185,24 @@ class TerminalDisplay:
         """Render an error message"""
         self.console.print(
             Panel(
-                f"[bold bright_red]Error:[/bold bright_red]\n[white]{error_message}[/white]",
-                title="[bold red on black]ERROR[/bold red on black]",
-                border_style="red on black",
+                f"[bold {self.colors['danger']}]Error:[/bold {self.colors['danger']}]\n[white]{error_message}[/white]",
+                title=f"[bold {self.colors['danger']}]Error[/bold {self.colors['danger']}]",
+                border_style=self.colors["danger"],
                 padding=(1, 2)
             )
         )
     
     def render_success_message(self, message: str):
         """Render a success message"""
-        self.console.print(f"[bright_yellow]✓[/] {message}", style="dim")
+        self.console.print(f"[{self.colors['success']}]✓[/] {message}", style=f"dim {self.colors['muted']}")
     
     def render_history(self, history_lines: list):
         """Render session history"""
         self.console.print(
             Panel(
                 "\n\n".join(history_lines),
-                title="[bold bright_red on black]Session History (last 10 messages)[/bold bright_red on black]",
-                border_style="bright_red on black",
+                title=f"[bold {self.colors['accent']}]Session History (last 10 messages)[/bold {self.colors['accent']}]",
+                border_style=self.colors["accent"],
                 padding=(1, 2)
             )
         )
@@ -189,37 +210,37 @@ class TerminalDisplay:
     def render_help(self):
         """Render help panel"""
         help_text = Text()
-        help_text.append("TERMINUS CLI\n\n", style="bold bright_red")
+        help_text.append("TERMINUS CLI\n\n", style=f"bold {self.colors['accent']}")
         
-        help_text.append("Available Commands:\n\n", style="bold white")
+        help_text.append("Available Commands:\n\n", style=f"bold {self.colors['accent_alt']}")
         
-        help_text.append("  /help         ", style="bright_red")
+        help_text.append("  /help         ", style=self.colors["accent"])
         help_text.append(" - Display this help information\n", style="white")
-        help_text.append("  /plan <task>  ", style="bright_red")
+        help_text.append("  /plan <task>  ", style=self.colors["accent"])
         help_text.append(" - Create a detailed implementation plan for a feature\n", style="white")
-        help_text.append("  /context      ", style="bright_red")
+        help_text.append("  /context      ", style=self.colors["accent"])
         help_text.append(" - View current conversation context\n", style="white")
-        help_text.append("  /history      ", style="bright_red")
+        help_text.append("  /history      ", style=self.colors["accent"])
         help_text.append(" - View recent session history (last 10 messages)\n", style="white")
-        help_text.append("  /reset        ", style="bright_red")
+        help_text.append("  /reset        ", style=self.colors["accent"])
         help_text.append(" - Reset session history\n", style="white")
-        help_text.append("  /context_size ", style="bright_red")
+        help_text.append("  /context_size ", style=self.colors["accent"])
         help_text.append(" - Display context size\n", style="white")
-        help_text.append("  /clear        ", style="bright_red")
+        help_text.append("  /clear        ", style=self.colors["accent"])
         help_text.append(" - Clear the console screen\n", style="white")
-        help_text.append("  /exit         ", style="bright_red")
+        help_text.append("  /exit         ", style=self.colors["accent"])
         help_text.append(" - Exit the program (also: exit, quit, q)\n\n", style="white")
         
-        help_text.append("Usage:\n\n", style="bold white")
+        help_text.append("Usage:\n\n", style=f"bold {self.colors['accent_alt']}")
         help_text.append("  Simply type your query or question and press Enter.\n", style="white")
         help_text.append("  The AI assistant will process your request and provide a response.\n", style="white")
         help_text.append("  Use ", style="white")
-        help_text.append("/plan <description>", style="bright_red")
+        help_text.append("/plan <description>", style=self.colors["accent"])
         help_text.append(" to create detailed implementation plans.\n\n", style="white")
         
-        help_text.append("Planning Mode:\n\n", style="bold white")
+        help_text.append("Planning Mode:\n\n", style=f"bold {self.colors['accent_alt']}")
         help_text.append("  Use ", style="white")
-        help_text.append("/plan", style="bright_red")
+        help_text.append("/plan", style=self.colors["accent"])
         help_text.append(" to switch to planning mode for detailed feature planning.\n", style="white")
         help_text.append("  The planner will:\n", style="dim white")
         help_text.append("    • Analyze your codebase structure and patterns\n", style="dim white")
@@ -229,12 +250,12 @@ class TerminalDisplay:
         help_text.append("  Example: ", style="dim white")
         help_text.append("/plan build a user authentication system\n\n", style="bright_red")
         
-        help_text.append("File References:\n\n", style="bold white")
+        help_text.append("File References:\n\n", style=f"bold {self.colors['accent_alt']}")
         help_text.append("  Use ", style="white")
-        help_text.append("@filename", style="bright_cyan")
+        help_text.append("@filename", style=self.colors["accent_alt"])
         help_text.append(" to reference files in your messages.\n", style="white")
         help_text.append("  Type ", style="dim white")
-        help_text.append("@", style="bright_cyan")
+        help_text.append("@", style=self.colors["accent_alt"])
         help_text.append(" and press ", style="dim white")
         help_text.append("Tab", style="bright_yellow")
         help_text.append(" for autocomplete suggestions.\n", style="dim white")
@@ -246,7 +267,7 @@ class TerminalDisplay:
         help_text.append("compare @file1.py and @file2.py", style="bright_cyan")
         help_text.append("\n\n", style="white")
         
-        help_text.append("Tips:\n\n", style="bold white")
+        help_text.append("Tips:\n\n", style=f"bold {self.colors['accent_alt']}")
         help_text.append("  • Use ", style="white")
         help_text.append("Ctrl+C", style="bright_yellow")
         help_text.append(" to cancel a running operation\n", style="white")
@@ -257,21 +278,21 @@ class TerminalDisplay:
         self.console.print(
             Panel(
                 help_text,
-                title="[bold bright_red on black]═══ HELP ═══[/bold bright_red on black]",
-                border_style="bright_red on black",
+                title=f"[bold {self.colors['accent']}]═══ HELP ═══[/bold {self.colors['accent']}]",
+                border_style=self.colors["accent"],
                 padding=(1, 2)
             )
         )
     
 
     def render_table(self):
-        table = Table(title="Available Models")
+        table = Table(title="Available Models", box=box.ROUNDED, expand=False)
 
-        table.add_column("Model Name", justify="right", style="cyan", no_wrap=True)
-        table.add_column("Provider", style="magenta")
-        table.add_column("Context Size", style="red", justify="right")
-        table.add_column("Input Tokens Pricing", justify="right", style="green")
-        table.add_column("Output Tokens Pricing", justify="right", style="green")
+        table.add_column("Model Name", justify="right", style=self.colors["accent_alt"], no_wrap=True)
+        table.add_column("Provider", style=self.colors["accent"])
+        table.add_column("Context Size", style=self.colors["warning"], justify="right")
+        table.add_column("Input Tokens Pricing", justify="right", style=self.colors["success"])
+        table.add_column("Output Tokens Pricing", justify="right", style=self.colors["success"])
 
         for model in available_models:
 
@@ -315,7 +336,7 @@ class TerminalDisplay:
     
     def create_streaming_handler(self):
         """Create a streaming response handler with callbacks"""
-        return StreamingHandler(self.console)
+        return StreamingHandler(self.console, self.colors)
     
     def render_todo_panel(self, todos: list, handler=None):
         """Render the todo list panel with status indicators
@@ -348,13 +369,13 @@ class TerminalDisplay:
             # Status indicators
             if status == 'completed':
                 indicator = "✓"
-                style = "bright_green"
+                style = self.colors["success"]
             elif status == 'in_progress':
                 indicator = "⏳"
-                style = "bright_yellow"
+                style = self.colors["warning"]
             else:  # pending
                 indicator = "○"
-                style = "dim white"
+                style = f"dim {self.colors['muted']}"
             
             line = Text()
             line.append(f"{indicator}  ", style=style)
@@ -368,8 +389,8 @@ class TerminalDisplay:
         self.console.print(
             Panel(
                 todo_text,
-                title="[bold bright_cyan]Todos[/bold bright_cyan]",
-                border_style="bright_cyan",
+                title=f"[bold {self.colors['accent_alt']}]Todos[/bold {self.colors['accent_alt']}]",
+                border_style=self.colors["accent_alt"],
                 padding=(1, 2),
                 expand=False
             ),
@@ -380,8 +401,9 @@ class TerminalDisplay:
 class StreamingHandler:
     """Manages streaming response display with status updates"""
     
-    def __init__(self, console: Console):
+    def __init__(self, console: Console, colors=None):
         self.console = console
+        self.colors = colors or {}
         self.streaming_content = []
         self.live_display = None
         self.thinking_started = False
@@ -395,10 +417,11 @@ class StreamingHandler:
     
     def start(self):
         """Start the status spinner"""
+        accent = self.colors.get("accent", "bright_red")
         self.status = self.console.status(
-            status="[bold bright_red]Processing your request...",
+            status=f"[bold {accent}]Processing your request...",
             spinner="dots12",
-            spinner_style="bright_red"
+            spinner_style=accent
         )
         self.status.__enter__()
         return self
@@ -433,12 +456,13 @@ class StreamingHandler:
             # No need to parse markdown, just display raw with ANSI codes
             from rich.text import Text as RichText
             tool_text = RichText.from_ansi(message)
+            accent_alt = self.colors.get("accent_alt", "bright_cyan")
             self.status.stop()
             self.console.print(
                 Panel(
                     tool_text,
-                    title="[bold bright_cyan on black]Changes[/bold bright_cyan on black]",
-                    border_style="bright_cyan on black",
+                    title=f"[bold {accent_alt}]Changes[/bold {accent_alt}]",
+                    border_style=accent_alt,
                     padding=(1, 2),
                     expand=False
                 ),
@@ -453,10 +477,11 @@ class StreamingHandler:
                 # Display thinking header only once
                 if not self.thinking_started:
                     self.status.stop()
-                    self.console.print("\n[dim #F4AF2D][/] [bold #FF6C00]Thinking[/]")
+                    thinking = self.colors.get("warning", "#F4AF2D")
+                    self.console.print(f"\n[dim {thinking}][/] [bold {thinking}]Thinking[/]")
                     self.thinking_started = True
                 # Display thinking message token by token in tron orange
-                text = Text(message, style="#FF6C00")
+                text = Text(message, style=self.colors.get("warning", "#FF6C00"))
                 self.console.print(text, end="")
         else:
             # End thinking line if it was active
@@ -464,11 +489,13 @@ class StreamingHandler:
                 self.console.print()  # New line
                 self.thinking_started = False
             
-            self.status.update(f"[bold bright_red]{message}...")
+            accent = self.colors.get("accent", "bright_red")
+            muted = self.colors.get("muted", "dim white")
+            self.status.update(f"[bold {accent}]{message}...")
             # Stop status temporarily to print the message
             self.status.stop()
             # Display tool message
-            self.console.print(f"  [dim bright_yellow]→[/] [bright_yellow]{message}[/]")
+            self.console.print(f"  [dim {muted}]→[/] [{accent}]{message}[/]")
             self.status.start()
     
     def handle_streaming(self, content_chunk: str):
@@ -483,11 +510,12 @@ class StreamingHandler:
         # Stop the status spinner and create live display when we have content
         if self.live_display is None:
             self.status.stop()
+            accent = self.colors.get("accent", "bright_red")
             self.live_display = Live(
                 Panel(
                     Markdown(accumulated),
-                    title="[bold bright_red on black]Response[/bold bright_red on black]",
-                    border_style="bright_red on black",
+                    title=f"[bold {accent}]Response[/bold {accent}]",
+                    border_style=accent,
                     padding=(1, 2)
                 ),
                 console=self.console,
@@ -496,11 +524,12 @@ class StreamingHandler:
             self.live_display.start()
         else:
             # Update live display with accumulated content
+            accent = self.colors.get("accent", "bright_red")
             self.live_display.update(
                 Panel(
                     Markdown(accumulated),
-                    title="[bold bright_red on black]Response[/bold bright_red on black]",
-                    border_style="bright_red on black",
+                    title=f"[bold {accent}]Response[/bold {accent}]",
+                    border_style=accent,
                     padding=(1, 2)
                 )
             )
@@ -527,13 +556,13 @@ class StreamingHandler:
             # Status indicators
             if status == 'completed':
                 indicator = "✓"
-                style = "bright_green"
+                style = self.colors.get("success", "bright_green")
             elif status == 'in_progress':
                 indicator = "⏳"
-                style = "bright_yellow"
+                style = self.colors.get("warning", "bright_yellow")
             else:  # pending
                 indicator = "○"
-                style = "dim white"
+                style = f"dim {self.colors.get('muted', 'white')}"
             
             line = Text()
             line.append(f"{indicator}  ", style=style)
@@ -544,10 +573,11 @@ class StreamingHandler:
         todo_text = Text("\n").join(todo_lines)
         
         # Create the panel
+        accent_alt = self.colors.get("accent_alt", "bright_cyan")
         todo_panel = Panel(
             todo_text,
-            title="[bold bright_cyan]Todos[/bold bright_cyan]",
-            border_style="bright_cyan",
+            title=f"[bold {accent_alt}]Todos[/bold {accent_alt}]",
+            border_style=accent_alt,
             padding=(1, 2),
             expand=False
         )
@@ -584,11 +614,12 @@ class StreamingHandler:
         # Only render if no streaming occurred, otherwise Live display already showed it
         if not self.has_streamed_content():
             md = Markdown(response)
+            accent = self.colors.get("accent", "bright_red")
             self.console.print(
                 Panel(
                     md,
-                    title="[bold bright_red on black]Response[/bold bright_red on black]",
-                    border_style="bright_red on black",
+                    title=f"[bold {accent}]Response[/bold {accent}]",
+                    border_style=accent,
                     padding=(1, 2)
                 )
             )
