@@ -4,6 +4,9 @@ from src.utils import process_file_references
 import sys
 import os
 import json
+import signal
+import threading
+import time
 from src.models.llm import available_models
 
 
@@ -17,6 +20,21 @@ class TerminusCLI:
         
         self.agent = Agent(cwd=cwd)
         self.display = TerminalDisplay()
+        self.stop_event = threading.Event()
+        self.sigint_pending_exit = False
+        self.last_sigint_time = 0.0
+        self.sigint_grace_window = 1.5  # seconds to treat double Ctrl+C as exit
+        self._prev_sigint = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self._handle_sigint)
+
+    def _handle_sigint(self, signum, frame):
+        # First Ctrl+C cancels current turn; a second within the grace window exits
+        now = time.monotonic()
+        self.stop_event.set()
+        self.sigint_pending_exit = (now - self.last_sigint_time) <= self.sigint_grace_window
+        self.last_sigint_time = now
+        self.stop_event.set()
+        raise KeyboardInterrupt()
     
     def display_available_models(self):
         self.display.render_table()
@@ -74,6 +92,7 @@ class TerminusCLI:
     def process_query(self, user_input: str):
         """Process user query and coordinate with agent and display"""
         try:
+            self.stop_event.clear()
             # Process @ file references
             enriched_message, loaded_files, errors = process_file_references(user_input)
             
@@ -97,7 +116,8 @@ class TerminusCLI:
                     enriched_message, 
                     status_callback=handler.update_status,
                     streaming_callback=handler.handle_streaming,
-                    todo_display_callback=lambda todos: self.display.render_todo_panel(todos, handler=handler)
+                    todo_display_callback=lambda todos: self.display.render_todo_panel(todos, handler=handler),
+                    stop_event=self.stop_event,
                 )
             
             # Render final response after live display stops to keep content visible
@@ -117,8 +137,10 @@ class TerminusCLI:
             )
             
         except KeyboardInterrupt:
-            self.display.print_message("\n[bold bright_red]Operation cancelled by user[/bold bright_red]")
-            raise
+            if self.sigint_pending_exit:
+                raise
+            self.display.print_message("\n[bold yellow]Turn cancelled. Press Ctrl+C again to exit.[/bold yellow]")
+            return
         except Exception as e:
             self.display.render_error(str(e))
     
@@ -292,9 +314,9 @@ class TerminusCLI:
     def run_interactive(self):
         """Run interactive mode with conversation loop"""
         self.display.render_banner()
-        
-        try:
-            while True:
+        while True:
+            try:
+                self.stop_event.clear()
                 user_input = self.display.get_user_input()
                 
                 # Handle empty input
@@ -311,10 +333,16 @@ class TerminusCLI:
                 # Process as query
                 self.process_query(user_input)
                 self.display.print_newline()
-                
-        except KeyboardInterrupt:
-            self.display.print_message("\n[bright_red]Exiting TERMINUS...[/bright_red]")
-            sys.exit(0)
+            
+            except KeyboardInterrupt:
+                if self.sigint_pending_exit:
+                    self.display.print_message("\n[bright_red]Exiting TERMINUS...[/bright_red]")
+                    sys.exit(0)
+                # Single interrupt: cancel turn, keep session
+                self.display.print_message("\n[bold yellow]Turn cancelled. Press Ctrl+C again to exit.[/bold yellow]")
+                self.stop_event.clear()
+                self.sigint_pending_exit = False
+                continue
     
     def run_single_query(self, query: str):
         """Run a single query (useful for non-interactive mode)"""
