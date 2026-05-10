@@ -1,0 +1,22 @@
+{
+  "name": "terminus-react-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/main.tsx",
+    "build": "tsc",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "ink": "^5.2.0",
+    "marked": "^9.1.6",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/react": "^18.3.20",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
