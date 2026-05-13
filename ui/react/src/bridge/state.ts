@@ -129,6 +129,8 @@ function applyMessage(state: BridgeState, msg: InboundMessage): BridgeState {
         return { ...state, messages };
       }
       return { ...state, messages: [...state.messages, { type: "thinking", content: msg.content, expanded: false }] };
+    case "alert":
+      return { ...state, messages: [...state.messages, { type: "alert", content: msg.content }] };
     case "error":
       return { ...state, messages: [...state.messages, { type: "error", content: msg.message }] };
     case "clear":

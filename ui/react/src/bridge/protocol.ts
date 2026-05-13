@@ -31,6 +31,7 @@ export type InboundMessage =
   | { type: "stream_chunk"; content: string }
   | { type: "stream_end"; content: string }
   | { type: "thinking"; content: string }
+  | { type: "alert"; content: string }
   | { type: "error"; message: string }
   | { type: "clear" }
   | { type: "exit" };

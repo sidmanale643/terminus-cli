@@ -9,11 +9,14 @@ export function getMessageColor(type: string): { color: string; dim: boolean } {
     accentAlt: "#EF4444",
     muted: "#9CA3AF",
     text: "#E5E7EB",
+    warning: "#FBBF24",
   };
 
   switch (type) {
     case "error":
       return { color: COLORS.danger, dim: false };
+    case "alert":
+      return { color: COLORS.warning, dim: false };
     case "success":
       return { color: COLORS.success, dim: false };
     case "user":
