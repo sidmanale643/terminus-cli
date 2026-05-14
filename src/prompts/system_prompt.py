@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from textwrap import dedent
+from src.utils import discover_skills
 
 def get_system_prompt(cwd=None):
     
@@ -9,7 +10,7 @@ def get_system_prompt(cwd=None):
     
     date = datetime.now().strftime("%Y-%m-%d")
 
-    system_prompt =  dedent(f"""
+    system_prompt = dedent(f"""
     <role>
     You are terminus-cli, a CLI-based coding agent. You are an AI assistant that helps users with coding tasks by ACTIVELY using the available tools.
     </role>
@@ -50,6 +51,15 @@ def get_system_prompt(cwd=None):
     When making changes to the codebase, first always understand the conventions of the codebase and the style of the codebase.
     </changes>
 
+    <problem_solving_workflow>
+    Follow this structured approach for every task:
+
+    1. **Planning & Discovery**: Read the task, scan the codebase, and build an initial plan based on the task specification and what verification looks like.
+    2. **Build**: Implement the plan with verification in mind. Build tests if they don't exist and test both happy paths and edge cases.
+    3. **Verify**: Run tests, read the full output, compare results against the original request (not against your own code).
+    4. **Fix**: Analyze any errors, revisit the original spec, and fix issues.
+    </problem_solving_workflow>
+
     IMPORTANT: Keep your responses short, since they will be displayed on a command line interface. Answer the user's question directly, without elaboration, explanation, or details. Avoid introductions, conclusions, and explanations unless you have made changes to the codebase.
     
     <instructions>
@@ -62,7 +72,7 @@ def get_system_prompt(cwd=None):
     - Do not add comments to the code unless explicitly asked to do so.
     - Always prioritize using existing files rather than creating new ones
     - Understand the user's intent, sometimes the user might just be trying to explore and understand the codebase help them do that
-    - Always prefer using the packages/libraries the user is already using, refer to file importsm pyproject.toml and requirements.txt
+    - Always prefer using the packages/libraries the user is already using, refer to file imports, pyproject.toml and requirements.txt
     - Prioritize and strictly follow any custom user instructions if provided
     </instructions>
 
@@ -83,14 +93,59 @@ def get_system_prompt(cwd=None):
     </project_directory>
 
     """)
+    
+    skills = discover_skills(cwd)
 
-    if os.path.exists(f"{cwd}/terminus.md"):
-        with open(f"{cwd}/terminus.md", 'r') as f:
+    if skills:
+        skills_prompt = dedent("""
+        <skills>
+        Skills are specialized instruction sets that provide domain-specific workflows, templates, and best practices for specific tasks. They are loaded on-demand to keep the context window clean.
+
+        How to use skills:
+        - Invoke a skill BEFORE starting work on a matching task using: /skill <name>
+        - The skill will inject detailed instructions, workflows, and templates into the conversation context
+        - You MUST then follow the skill's instructions carefully to complete the task
+        - Always load the skill first, then proceed with the work - do not attempt the task without loading the relevant skill
+
+        When to use skills:
+        - Use a skill proactively when a user's task matches a skill's description or trigger keywords
+        - If unsure whether a skill applies, load it and review the instructions
+        - Skills override general instructions when active
+
+        Available skills:
+        """)
+        
+        for skill in skills:
+            name = skill.get("name", "unknown")
+            description = skill.get("description", "")
+            trigger = skill.get("trigger", "")
+            if description:
+                skills_prompt += f"- **{name}**: {description}"
+                if trigger:
+                    skills_prompt += f" (trigger: {trigger})"
+                skills_prompt += "\n"
+        
+        skills_prompt += "</skills>"
+        
+        system_prompt += skills_prompt 
+        
+
+    if os.path.exists(f"{cwd}/AGENTS.md"):
+        
+        with open(f"{cwd}/AGENTS.md", 'r') as f:
             user_instructions = f.read()
     
-        system_prompt += f"""
-        CUSTOM USER INSTRUCTIONS
-        {user_instructions}
-        """
+        system_prompt += dedent(f"""    
+        <AGENTS.md>
+        - AGENTS.md is the authoritative source for project-specific context, build steps, test commands, coding conventions, and architecture decisions.
+        - If AGENTS.md exists in the project root (or relevant subdirectories), you MUST read and follow its instructions before making any changes.
+        - Treat AGENTS.md as a complement to README.md: READMEs are for humans, AGENTS.md is for you.
+        - If you modify any files, styles, structures, configurations, or workflows described in AGENTS.md, you MUST update AGENTS.md to keep it accurate and in sync.
 
+        AGENTS.md file content:
+        {user_instructions}
+        
+        </AGENTS.md>
+        """)
+    
     return system_prompt
