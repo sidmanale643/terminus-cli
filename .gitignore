@@ -9,6 +9,22 @@ wheels/
 # Virtual environments
 .venv
 .ruff_cache
-.db
 
-notebooks/
+# Database
+.db/
+
+# Environment / secrets
+.env
+
+# OS files
+.DS_Store
+
+# Notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+
+# Lock files (optional — uncomment if you don't want to track)
+# uv.lock

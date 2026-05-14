@@ -9,17 +9,19 @@ description = "AI-powered development companion for the command line"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "aiofiles>=25.1.0",
     "groq>=0.33.0",
     "ipykernel>=7.0.1",
+    "litellm>=1.80.0",
     "openai>=2.6.1",
-    "openrouter>=1.0",
+    "openrouter>=0.0.19",
     "prompt-toolkit>=3.0.43",
     "pydantic>=2.12.3",
     "python-dotenv>=1.2.1",
     "rich>=14.2.0",
     "ruff>=0.14.2",
     "tavily-python>=0.5.0",
+    "langfuse>=2.60.0,<3",
+    "daytona>=0.175.0",
 ]
 
 [project.scripts]
