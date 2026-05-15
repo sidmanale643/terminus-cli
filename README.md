@@ -8,24 +8,31 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-active-brightgreen.svg)](https://github.com/sidmanale643/terminus-cli)
 
-Terminus CLI is an AI-powered tool that automates coding tasks, manages files, and streamlines your development workflow directly from the command line.
+Terminus CLI is an AI-powered tool that automates coding tasks, manages files, and streamlines your development workflow directly from the command line.    
 
 ## Features
 
+- **Modern Terminal UI**: Built with React/Ink for a rich, interactive experience (default); classic Rich/prompt_toolkit UI available via `--classic`
+- **Multi-Agent Architecture**: Coordinator spawns specialized subagents to handle parallel tasks and complex workflows
 - **Codebase Understanding**: Scans your entire codebase to provide context-aware suggestions and understand complex project structures
 - **Natural Language Tasks**: Describe tasks in plain English—Terminus interprets and executes them seamlessly
 - **File Operations**: AI-guided reading, editing, creation, and refactoring of files with precision and safety
 - **Code Search**: Ripgrep-powered search to locate patterns, dependencies, and issues across your project
-- **LLM Integration**: Supports Groq, OpenRouter, and custom LLMs for tailored performance and cost efficiency
+- **LLM Integration**: Supports Groq, OpenRouter, and Google Gemini models for tailored performance and cost efficiency
 - **Session Memory**: Maintains conversation history and context for multi-step development tasks without restarting
-- **Built-in Tools**: Includes linting with Ruff, task tracking, and secure system command execution
+- **Context Compaction**: Automatically compresses long conversations to stay within model context limits
+- **Built-in Tools**: Includes linting with Ruff, todo tracking, web search (Tavily), secure system command execution, and sandboxed code execution
+- **Worker Management**: Spawn, monitor, and collect results from background worker agents in parallel
+- **Skills System**: Load specialized skill definitions from `.skills/` directories to augment agent capabilities
 - **Project Customization**: Adapts behavior via `terminus.md` files for coding standards, preferences, and workflows
+- **Observability**: Optional Langfuse integration for tracing and monitoring agent runs
 
 ## Quick Start
 
 ### Prerequisites
 - Python 3.11 or higher
 - [uv](https://docs.astral.sh/uv/) (recommended for fast dependency management; pip works too)
+- Node.js (for React/Ink UI; optional if using `--classic`)
 
 ### Installation
 
@@ -62,6 +69,9 @@ uv sync
 # Install in editable mode
 uv pip install -e .
 
+# Install React UI dependencies
+cd ui/react && npm install && cd ../..
+
 # Setup environment file
 cp .env.sample .env
 # Edit .env with your API keys (see below)
@@ -77,14 +87,30 @@ Create or edit `.env` in your project root or home directory:
 # Required for LLM access
 GROQ_API_KEY=your_groq_key_here
 OPENROUTER_API_KEY=your_openrouter_key_here
+GEMINI_API_KEY=your_gemini_key_here
+
+# Optional: Web search
+TAVILY_API_KEY=your_tavily_key_here
+
+# Optional: Observability (Langfuse)
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
+
+# Optional: Daytona sandbox
+DAYTONA_API_KEY=dtn-...
 
 # Optional: Default model
-DEFAULT_MODEL=groq/llama3-8b-8192  # Or openrouter/model-name
+DEFAULT_MODEL=openrouter/google/gemma-4-31b-it:free
 ```
 
 Obtain keys from:
 - [Groq Console](https://console.groq.com/keys)
 - [OpenRouter](https://openrouter.ai/keys)
+- [Google AI Studio](https://aistudio.google.com/app/apikey)
+- [Tavily](https://app.tavily.com/home)
+- [Langfuse](https://cloud.langfuse.com)
+- [Daytona](https://www.daytona.io)
 
 ## Usage Examples
 
@@ -125,6 +151,14 @@ terminus "Optimize the code in @src/agent.py"
 terminus "Document the classes in @src/models/schema.py"
 ```
 
+### Classic UI
+
+If you prefer the classic Rich/prompt_toolkit interface:
+
+```bash
+terminus --classic
+```
+
 ## Built-in Commands
 
 Available in interactive mode:
@@ -133,14 +167,19 @@ Available in interactive mode:
 |---------|-------------|
 | `/help` | Display help and available commands |
 | `/context` | Show current session context |
-| `/history` | View conversation history |
+| `/history` | View last 5 conversation messages |
 | `/reset` | Reset context and start over |
 | `/exit` | Exit the application |
 | `/clear` | Clear the screen |
 | `/context_size` | Display current context size |
-| `/list_models` | List available models |
-| `/switch` | Switch to a different model |
-| `/model` | Show current model |
+| `/compact` | Compress conversation context to free tokens |
+| `/models` | Switch AI model interactively |
+| `/connect` | Configure provider API key |
+| `/plan` | Create an implementation plan |
+| `/skills` | List available skills in `.skills/` directory |
+| `/skill <name>` | Load a skill into the current context |
+| `/copy` | Copy last response to clipboard |
+| `/init` | Generate or update AGENTS.md |
 
 ### Custom Instructions with `terminus.md`
 
@@ -166,50 +205,117 @@ Terminus loads this file automatically, incorporating instructions into its resp
 
 ```
 terminus-cli/
-├── pyproject.toml      # Dependencies and build config
-├── uv.lock             # Lockfile for dependencies
+├── pyproject.toml          # Dependencies and build config
+├── uv.lock                 # Lockfile for dependencies
 ├── src/
-│   ├── __init__.py
-│   ├── agent.py        # Core AI agent logic
-│   ├── constants.py    # Constants and configurations
-│   ├── main.py         # CLI entry point
-│   ├── session_manager.py  # Session management
-│   ├── tools/          # Tool definitions (file I/O, search, exec, etc.)
-│   ├── llm_service/    # LLM client integrations
-│   ├── models/         # Pydantic models for data handling
-│   ├── prompts/        # Prompt templates
-│   └── utils/          # Shared utilities
-├── ui/                 # Terminal interface (prompts, output formatting)
-├── notebooks/          # Exploratory Jupyter notebooks
-├── assets/             # Project assets (images, etc.)
-├── README.md           # Documentation
-├── .env.sample         # Config template
-└── .gitignore          # Git ignore patterns
+│   ├── main.py             # CLI entry point
+│   ├── agent.py            # Core AI agent loop (tool-calling, streaming, context)
+│   ├── coordinator.py      # Multi-agent coordinator for parallel task delegation
+│   ├── multi_agent.py      # Multi-agent orchestration utilities
+│   ├── context_manager.py  # Context compaction and size tracking
+│   ├── session_manager.py  # SQLite-backed session history
+│   ├── constants.py        # Model defaults and constants
+│   ├── utils.py            # Shared utilities (file refs, tool merging)
+│   ├── commands/           # Slash command registry and palette UI
+│   ├── tools/              # Tool implementations
+│   │   ├── read_file.py
+│   │   ├── read_multiple_files.py
+│   │   ├── edit_file.py
+│   │   ├── multi_edit.py
+│   │   ├── create_file.py
+│   │   ├── grep.py
+│   │   ├── ls.py
+│   │   ├── cmd_executor.py
+│   │   ├── lint.py
+│   │   ├── web_search.py
+│   │   ├── todo.py
+│   │   ├── subagent.py
+│   │   ├── spawn_worker.py
+│   │   ├── spawn_workers_batch.py
+│   │   ├── stop_worker.py
+│   │   ├── list_workers.py
+│   │   ├── await_workers.py
+│   │   ├── get_worker_result.py
+│   │   ├── ask_question.py
+│   │   ├── send_notification.py
+│   │   └── sandbox.py
+│   ├── llm_service/        # LLM client integrations (Groq, OpenRouter, Gemini)
+│   ├── models/             # Pydantic models (LLM configs, tool schemas)
+│   ├── prompts/            # System/planner/coordinator/compaction prompt templates
+│   ├── observability/      # Langfuse tracing integration
+│   └── __init__.py
+├── ui/
+│   ├── react/              # React/Ink frontend (TypeScript)
+│   │   ├── src/main.tsx
+│   │   ├── src/components/  # Ink UI components (Banner, InputBox, etc.)
+│   │   ├── src/bridge/        # Socket IPC, protocol, and state modules
+│   │   └── package.json
+│   ├── react_display.py    # Python ↔ React bridge (Unix socket IPC)
+│   ├── display.py          # Classic Rich/prompt_toolkit UI
+│   └── streaming.py        # Streaming output handler
+├── .skills/                # Skill definitions (SKILL.md with YAML frontmatter)
+├── .db/                    # SQLite chat history (auto-created)
+├── README.md
+├── .env.sample             # Config template
+└── .gitignore
 ```
 
-The agent uses a tool-calling architecture, delegating tasks to specialized functions for safe, precise operations.
+The agent uses a **tool-calling architecture**, delegating tasks to specialized functions for safe, precise operations. A **coordinator layer** can spawn **subagents** to handle independent tasks in parallel.
 
 ## Development Guide
 
 ### Running the Application
 
-- Interactive: `terminus`
-- Debug: `python -m src.main --debug`
+```bash
+# Interactive mode (React UI by default)
+terminus
+
+# One-shot query
+terminus "explain the codebase"
+
+# Classic Rich/prompt_toolkit UI
+terminus --classic
+
+# Direct Python execution (useful for debugging)
+python -m src.main --debug
+```
+
+### React UI Development
+
+```bash
+cd ui/react
+npm install   # if node_modules missing
+npm run build # TypeScript check (tsc)
+npm run dev   # Run via tsx (standalone, for testing)
+npm run start # Run compiled dist/main.js
+```
 
 ### Testing
 
 ```bash
-uv run pytest tests/
-uv run pytest --cov src/
+# Async system tests
+python tests/test_async_system.py
+
+# React UI socket smoke test
+python test_react.py
+
+# React UI component test
+python test_react_ui.py
 ```
 
+### Lint / Format
+
+```bash
+ruff check src/    # lint
+ruff format src/   # format
+```
 
 ### Adding Tools or Features
 
-1. Implement in `src/tools/`
-2. Register in `agent.py`
-3. Add tests in `tests/`
-4. Update README if user-facing
+1. Implement the tool in `src/tools/`
+2. Register it in `src/tools/tool_registry.py`
+3. Update `src/prompts/` if behavior changes
+4. Update `README.md` if user-facing
 
 ## Contributing
 
