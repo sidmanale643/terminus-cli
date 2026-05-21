@@ -52,15 +52,23 @@ class SendNotification(ToolSchema):
             },
         }
 
-    def run(self, id, status, summary, final_response):
+    def run(self, status, summary, final_response, id=None, **kwargs):
         try:
-            notification= {
-                "id": id,
+            agent_id = kwargs.get("_agent_id")
+            notification = {
+                "id": agent_id or id,
                 "status": status,
                 "summary": summary,
-                "final_response": final_response
+                "final_response": final_response,
             }
+
+            # If invoked from a worker via the coordinator, the callback
+            # forwards the notification to the coordinator's context.
+            callback = kwargs.get("_notification_callback")
+            if callable(callback):
+                callback(notification)
+
             return json.dumps(notification)
-        
+
         except Exception as e:
-            return f"Error reading file: {e}"
+            return f"Error sending notification: {e}"

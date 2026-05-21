@@ -34,22 +34,31 @@ class SpawnWorker(ToolSchema):
                             "type": "string",
                             "description": "A brief description of what the worker will do",
                         },
+                        "role": {
+                            "type": "string",
+                            "enum": ["explorer", "implementer", "verifier", "summarizer"],
+                            "description": "Specialized role for the worker. Choose the narrowest role that fits the task.",
+                        },
                         "prompt": {
                             "type": "string",
-                            "description": "The task prompt to send to the worker agent",
+                            "description": "The task prompt to send to the worker agent. Include the compact handoff requirement: what_was_done, evidence, unresolved_risks, exact_next_step.",
                         },
                     },
-                    "required": ["name", "description", "prompt"],
+                    "required": ["name", "description", "prompt", "role"],
                 },
             },
         }
 
-    def run(self, id: str, name: str, description: str, prompt: str):
-        from src.agent import Agent
+    def run(self, **kwargs):
+        """Execution is handled by Coordinator.spawn_worker(); this stub
+        satisfies the abstract base class and prevents accidental use.
+        """
+        raise NotImplementedError(
+            "SpawnWorker is schema-only. Use Coordinator.spawn_worker() instead."
+        )
 
-        try:
-            worker = Agent(id=id, name=name, description=description)
-            result = worker.run(prompt)
-            return result
-        except Exception as e:
-            return f"Error spawning worker '{name}': {e}"
+    async def arun(self, **kwargs):
+        """Async variant — same redirect as run()."""
+        raise NotImplementedError(
+            "SpawnWorker is schema-only. Use Coordinator.spawn_worker() instead."
+        )

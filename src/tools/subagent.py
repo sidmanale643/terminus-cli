@@ -1,6 +1,7 @@
 from src.models.tool import ToolSchema
 from textwrap import dedent
 
+
 class SubAgent(ToolSchema):
     def __init__(self):
         self.name = "subagent"
@@ -18,42 +19,43 @@ class SubAgent(ToolSchema):
 
         Use this tool when you want to keep the main agent's context window clean and focused on the current task.
         """).strip()
-    
+
     def json_schema(self):
         return {
-        "type": "function",
-        "function": {
-            "name": self.name, 
-            "description": self.description(),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The task assigned by the main agent for the subagent to complete"
-                    }
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "The task assigned by the main agent for the subagent to complete",
+                        }
+                    },
+                    "required": ["task"],
                 },
-                "required": ["task"]
-            }
+            },
         }
-    }
 
-    def run(self, task: str):
+    def run(self, task: str, _status_callback=None, _stop_event=None, _tool_call_callback=None, _tool_output_callback=None):
         try:
-            # Import here to avoid circular import
             from src.agent import Agent
-            
-            # Create fresh agent instance for each task
+
             self.subagent = Agent()
-            
-            # Initialize with system prompt
             self.subagent.add_system_message()
-            
-            # Run the delegated task
-            result = self.subagent.run(user_message=task)
-            
+
+            result = self.subagent.run(
+                user_message=task,
+                status_callback=_status_callback,
+                tool_call_callback=_tool_call_callback,
+                tool_output_callback=_tool_output_callback,
+                stop_event=_stop_event,
+            )
+
             return result
-            
+
         except Exception as e:
             error_msg = f"Subagent execution failed: {str(e)}"
             print(f"[ERROR] {error_msg}")

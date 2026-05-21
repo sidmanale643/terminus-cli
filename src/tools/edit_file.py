@@ -1,182 +1,200 @@
-from src.models.tool import ToolSchema 
-from textwrap import dedent
 import difflib
-from rich.console import Console
+import os
+from src.models.tool import ToolSchema
+from textwrap import dedent
+
 
 class FileEditor(ToolSchema):
     def __init__(self):
         self.name = "file_editor"
-        self.console = Console()
-    
-    
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    CYAN = '\033[96m'
-    YELLOW = '\033[93m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'
-    
+
     def description(self):
         return dedent("""
-        Performs precise edits in a file.
-        Edit file contents by performing precise text replacement operations.
+        Performs exact string replacements in files.
 
-        This tool allows you to make targeted edits to existing files by replacing specific text patterns with new content.
-
-        First read the contents of the file to understand the structure.
-        Carefully match patterns and replace only the specific text you want to change.
-        Be precise with indentation and whitespace.
-
-        IMPORTANT: Never add emojis unless specifically asked to do so by the user.
+        Usage:
+        - Read the file with file_reader before editing so old_string can be copied exactly.
+        - Use file_path for the path. Relative paths are resolved from the current working directory. path is accepted as a compatibility alias.
+        - Use old_string/new_string for a single edit or old_strings/new_strings for multiple edits in one atomic operation.
+        - When editing text from file_reader output, preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
+        - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+        - The edit will FAIL if `old_string` is not found in the file with an error.
+        - The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`.
+        - Multiple edits are applied sequentially. If any replacement fails, no changes are written.
         """)
-    
+
     def json_schema(self):
         return {
-        "type": "function",
-        "function": {
-            "name": self.name, 
-            "description": self.description(),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "the path of the file to edit"
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "the path of the file to edit",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "compatibility alias for file_path",
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "the old string to replace",
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "the new string to replace the old string with",
+                        },
+                        "old_strings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "the old strings to replace in order",
+                        },
+                        "new_strings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "the replacement strings to apply in order",
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "If true, replace all occurrences of old_string. Defaults to false (replace only the first occurrence).",
+                        },
                     },
-                    "old_string": {
-                        "type": "string",
-                        "description": "the old string to replace"
-                    },
-                    "new_string": {
-                        "type": "string",
-                        "description": "the new string to replace the old string with"
-                    },
+                    "required": ["file_path"],
                 },
-                "required": ["file_path", "old_string", "new_string"]
-            }
+            },
         }
-    }
-    
-    def format_colored_diff(self, diff_lines):
-        result = []
-        for line in diff_lines:
-            
-            line = line.rstrip()
-            
-            if line.startswith('---') or line.startswith('+++'):
-                
-                result.append(f"{self.BOLD}{self.YELLOW}{line}{self.RESET}")
-            elif line.startswith('+'):
-                
-                result.append(f"{self.GREEN}{line}{self.RESET}")
-            elif line.startswith('-'):
-                
-                result.append(f"{self.RED}{line}{self.RESET}")
-            elif line.startswith('@@'):
-                
-                result.append(f"{self.BOLD}{self.CYAN}{line}{self.RESET}")
-            else:
-                
-                result.append(line)
-        return '\n'.join(result)
-    
-    def ask_for_permission(self, diff_preview, status_callback=None):
-        
-        # Try to get the StreamingHandler's console if status_callback is provided
-        console_to_use = self.console
-        handler = None
-        
-        if status_callback and hasattr(status_callback, '__self__'):
-            # status_callback is a bound method, get the handler (StreamingHandler instance)
-            handler = status_callback.__self__
-            if hasattr(handler, 'console'):
-                console_to_use = handler.console
-        
-        while True:
-            # Use the appropriate console for input
-            console_to_use.print()  # Add a blank line for spacing
-            response = console_to_use.input("[bold bright_red]Apply these changes? (y/n):[/bold bright_red] ").strip().lower()
-            if response in ['y', 'yes']:
-                # Restart status spinner if it was stopped
-                if handler and hasattr(handler, 'status') and handler.status:
-                    handler.status.start()
-                return True
-            elif response in ['n', 'no']:
-                # Restart status spinner if it was stopped
-                if handler and hasattr(handler, 'status') and handler.status:
-                    handler.status.start()
-                return False
-            else:
-                console_to_use.print("[yellow]Please enter 'y' or 'n'[/yellow]")
-         
 
-    def run(self, file_path : str, old_string : str, new_string : str, status_callback=None):
+    def _make_diff(self, old_text: str, new_text: str, file_path: str) -> str:
+        old_lines = old_text.splitlines(keepends=True)
+        new_lines = new_text.splitlines(keepends=True)
+        diff = list(
+            difflib.unified_diff(
+                old_lines,
+                new_lines,
+                fromfile=f"a/{file_path}",
+                tofile=f"b/{file_path}",
+                lineterm="",
+                n=3,
+            )
+        )
+        return "\n".join(diff) if diff else "(no visible diff)"
+
+    def run(
+        self,
+        file_path: str = None,
+        old_string: str = None,
+        new_string: str = None,
+        old_strings: list[str] = None,
+        new_strings: list[str] = None,
+        replace_all: bool = False,
+        path: str = None,
+    ):
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            file_path = file_path or path
+            if not file_path:
+                return "Error: file_path is required"
+            if old_strings is not None or new_strings is not None:
+                return self._run_multiple(file_path, old_strings, new_strings)
+            if old_string is None or new_string is None:
+                return "Error: old_string/new_string or old_strings/new_strings are required"
+            file_path = os.path.expanduser(file_path)
+            if not os.path.isabs(file_path):
+                file_path = os.path.abspath(file_path)
+            with open(file_path, "r", encoding="utf-8") as f:
                 original_content = f.read()
 
-            
             if old_string not in original_content:
-                return f"{self.RED}Error:{self.RESET} The string to replace was not found in {file_path}\n\nMake sure to read the file first and use the exact string (including whitespace and indentation) that you want to replace."
-            
-            
-            occurrence_count = original_content.count(old_string)
-            if occurrence_count > 1:
-                return f"{self.YELLOW}Warning:{self.RESET} The string appears {occurrence_count} times in {file_path}\n\nThis will replace ALL occurrences. If you want to replace only one, include more context to make the old_string unique."
-            
-            
-            new_content = original_content.replace(old_string, new_string, 1)
+                return (
+                    f"Error: The string to replace was not found in {file_path}\n\n"
+                    "Make sure to read the file first and use the exact string "
+                    "(including whitespace and indentation) that you want to replace."
+                )
 
+            occurrence_count = original_content.count(old_string)
+
+            if occurrence_count > 1 and not replace_all:
+                return (
+                    f"Error: The string appears {occurrence_count} times in {file_path}. "
+                    "Either provide more context to make old_string unique, "
+                    "or set replace_all=true to replace all occurrences."
+                )
+
+            if replace_all:
+                new_content = original_content.replace(old_string, new_string)
+            else:
+                new_content = original_content.replace(old_string, new_string, 1)
 
             if original_content == new_content:
                 return f"No changes made to {file_path} (old_string and new_string are identical)."
 
-            # Create diff to show user
-            original_lines = old_string.splitlines(keepends=True)
-            new_lines = new_string.splitlines(keepends=True)
-            
-            diff = list(difflib.unified_diff(
-                original_lines,
-                new_lines,
-                fromfile=f"a/{file_path}",
-                tofile=f"b/{file_path}",
-                lineterm='',
-                n=3
-            ))
+            diff = self._make_diff(old_string, new_string, file_path)
 
-            # Format the diff for display
-            colored_diff = self.format_colored_diff(diff) if diff else "No visible diff"
-            separator = "─" * 80
-            diff_preview = f"\n{self.BOLD}{self.CYAN}Proposed changes to:{self.RESET} {file_path}\n\n{separator}\n{colored_diff}\n{separator}\n"
-            
-            # Show diff to user BEFORE asking for permission
-            # Use status_callback if provided (for integration with StreamingHandler)
-            if status_callback:
-                # Display diff through the streaming handler with keep_stopped=True
-                # This keeps the status spinner stopped so we can get user input
-                status_callback(diff_preview, is_thinking=False, is_tool_output=True, keep_stopped=True)
-            else:
-                # Fallback: display directly via console
-                from rich.text import Text
-                diff_text = Text.from_ansi(diff_preview)
-                self.console.print(diff_text)
-            
-            if self.ask_for_permission(diff_preview, status_callback):
-                # User approved - write the file
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(new_content)
-                result = f"{self.GREEN}✓ File edited successfully: {file_path}{self.RESET}"
-            else:
-                # User rejected the change
-                result = f"{self.YELLOW}✗ Changes rejected by user{self.RESET}"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
 
-            return result
-            
+            count = occurrence_count if replace_all else 1
+            return f"Edited {file_path} ({count} replacement{'s' if count > 1 else ''})\n\n{diff}"
+
         except FileNotFoundError:
-            return f"{self.RED}Error:{self.RESET} File not found: {file_path}"
+            return f"Error: File not found: {file_path}"
         except PermissionError:
-            return f"{self.RED}Error:{self.RESET} Permission denied when trying to edit: {file_path}"
+            return f"Error: Permission denied editing {file_path}"
         except Exception as e:
-            return f"{self.RED}Error editing file:{self.RESET} {e}"
-    
-    
+            return f"Error editing file: {e}"
+
+    def _run_multiple(
+        self,
+        file_path: str,
+        old_strings: list[str] = None,
+        new_strings: list[str] = None,
+    ):
+        if old_strings is None or new_strings is None:
+            return "Error: old_strings and new_strings are required."
+        if len(old_strings) != len(new_strings):
+            return "Error: old_strings and new_strings must have the same length."
+
+        file_path = os.path.expanduser(file_path)
+        if not os.path.isabs(file_path):
+            file_path = os.path.abspath(file_path)
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except FileNotFoundError:
+            return f"Error: File not found: {file_path}"
+        except PermissionError:
+            return f"Error: Permission denied reading {file_path}"
+
+        original = content
+        results = []
+
+        for i, (old, new) in enumerate(zip(old_strings, new_strings)):
+            if old not in content:
+                results.append(f"  [{i + 1}] FAILED: old_string not found")
+                return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+
+            count = content.count(old)
+            if count > 1:
+                results.append(
+                    f"  [{i + 1}] FAILED: old_string found {count} times (ambiguous)"
+                )
+                return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+
+            content = content.replace(old, new, 1)
+            results.append(f"  [{i + 1}] OK")
+
+        if content == original:
+            return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except PermissionError:
+            return f"Error: Permission denied writing {file_path}"
+
+        diff = self._make_diff(original, content, file_path)
+        return f"Multi-edited {file_path}:\n" + "\n".join(results) + f"\n\n{diff}"
