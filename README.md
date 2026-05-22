@@ -219,14 +219,12 @@ terminus-cli/
 │   ├── commands/           # Slash command registry and palette UI
 │   ├── tools/              # Tool implementations
 │   │   ├── read_file.py
-│   │   ├── read_multiple_files.py
 │   │   ├── edit_file.py
-│   │   ├── multi_edit.py
 │   │   ├── create_file.py
 │   │   ├── grep.py
 │   │   ├── ls.py
-│   │   ├── cmd_executor.py
-│   │   ├── lint.py
+│   │   ├── bash.py
+│   │   ├── glob.py
 │   │   ├── web_search.py
 │   │   ├── todo.py
 │   │   ├── subagent.py

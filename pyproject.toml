@@ -14,13 +14,13 @@ dependencies = [
     "litellm>=1.80.0",
     "openai>=2.6.1",
     "openrouter>=0.0.19",
-    "prompt-toolkit>=3.0.43",
     "pydantic>=2.12.3",
+    "pyyaml>=6.0.0",
     "python-dotenv>=1.2.1",
-    "rich>=14.2.0",
     "ruff>=0.14.2",
     "tavily-python>=0.5.0",
     "langfuse>=2.60.0,<3",
+    "mcp>=1.0.0",
     "daytona>=0.175.0",
 ]
 
@@ -30,3 +30,6 @@ terminus = "src.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*", "ui*"]
+
+[tool.setuptools.package-data]
+"ui" = ["react/**/*"]
