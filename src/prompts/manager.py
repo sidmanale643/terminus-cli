@@ -8,9 +8,10 @@ class PromptManager:
     def __init__(self, cwd=None):
 
         self.system_prompt = get_system_prompt(cwd)
-        self.planner_prompt = get_planner_prompt()
+        self.planner_prompt = get_planner_prompt(cwd)
         self.init_prompt= get_init_prompt()
-        self.coordinator_prompt= get_coordinator_prompt()
+        self.coordinator_prompt= get_coordinator_prompt(self.system_prompt)
+        self.compaction_prompt = get_compaction_prompt()
         
         self.prompts = {}
         
@@ -30,5 +31,5 @@ class PromptManager:
         return self.coordinator_prompt
     
     def get_compaction_prompt(self):
-        return self.get_compaction_prompt
+        return self.compaction_prompt
     
