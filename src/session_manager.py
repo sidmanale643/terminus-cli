@@ -2,6 +2,7 @@ import sqlite3
 import datetime
 import os
 import json
+import uuid
 from src.constants import DEFAULT_DATABASE_DIR
 
 class SessionHistory:
@@ -39,6 +40,14 @@ class SessionHistory:
                 )
             """)
             self.session_history.commit()
+
+            self.ch_cursor.execute("""
+                CREATE TABLE IF NOT EXISTS preferences (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            self.con.commit()
             
         except sqlite3.OperationalError as e:
             print(f"Error initializing tables: {e}")
@@ -127,6 +136,17 @@ class SessionHistory:
         ]
         return self.insert_to_chat_history(name, chat_history)
 
+    def get_session_id(self):
+        """Return a stable session ID for grouping related traces.
+
+        Uses the timestamp of the first message in the session, or generates
+        a new UUID if the session is empty.
+        """
+        messages = self.retrieve_session_history(limit=1)
+        if messages:
+            return f"session-{messages[0]['timestamp']}"
+        return f"session-{uuid.uuid4().hex[:12]}"
+
     def clear_session_history(self):
         self.sh_cursor.execute("DELETE FROM session_history")
         self.session_history.commit()
@@ -134,6 +154,20 @@ class SessionHistory:
     def delete_chat_history(self, chat_id):
         self.ch_cursor.execute("DELETE FROM chat_history WHERE id = ?", (chat_id,))
         self.con.commit()
+
+    def set_preference(self, key: str, value: str):
+        self.ch_cursor.execute(
+            "INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self.con.commit()
+
+    def get_preference(self, key: str, default: str | None = None) -> str | None:
+        self.ch_cursor.execute(
+            "SELECT value FROM preferences WHERE key = ?", (key,)
+        )
+        row = self.ch_cursor.fetchone()
+        return row[0] if row else default
 
     def close(self):
         self.con.close()

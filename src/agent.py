@@ -1,387 +1,1225 @@
-from typing import Literal
-
+from typing import Literal, Optional
+from threading import Event
+import asyncio
 from src.models.llm import available_models
 from src.tools.tool_registry import ToolRegistry
 import json
+import sys
+import time
 from src.prompts import PromptManager
 from dotenv import load_dotenv
 from src.session_manager import SessionHistory
 from src.llm_service.service import LLMService
 from src.constants import DEFAULT_PROVIDER, DEFAULT_MODEL
+from src.context_manager import ContextManager
+from src.prompts.init_prompt import get_init_prompt
+from src.observability import langfuse as lf_obs
+import os
+import re
 
 load_dotenv()
 
 MAX_ITERATIONS = 50
+TOOL_TRIM_THRESHOLD_RATIO = 0.50
+COMPACTION_THRESHOLD_RATIO = 0.75
+SKILL_MESSAGE_PREFIX = "Skill loaded:"
+ASK_QUESTION_TOOL_NAME = "ask_question"
+
 
 class Agent:
-    def __init__(self, cwd=None):
+    def __init__(
+        self,
+        cwd=None,
+        id=None,
+        name=None,
+        system_prompt=None,
+        description=None,
+        notification_callback=None,
+        tool_registry=None,
+        max_iterations=None,
+        execution_mode: Literal["default", "coordinator_worker"] = "default",
+        use_streaming: bool = False,
+    ):
         """
         Initialize the Agent
-        
+
         Args:
             cwd: Optional working directory to use in system prompt. If None, uses os.getcwd()
+            notification_callback: Optional callable that receives dict notifications
+                when this agent uses the send_notification tool.
         """
-        # print("[INIT] Initializing Agent...")
-
-        self.name = "terminus-cli"
-        self.description = ""
+        self.id = id
+        self.cwd = cwd
+        self.name = name
+        self.description = description
+        self._notification_callback = notification_callback
+        self.execution_mode = execution_mode
+        self.use_streaming = use_streaming
+        self._subagent_counter = 0
         self.mode = "default"
-        self.context = []
-        self.context_size = 0
-        self.model_context_size = 200000
         self.iteration = 0
-        self.max_iterations = MAX_ITERATIONS
-        self.prompt_manager = PromptManager(cwd=cwd)
+        self.max_iterations = max_iterations or MAX_ITERATIONS
         self.available_models = available_models
-        self.system_prompt = self.prompt_manager.get_system_prompt()
-        self.planner_prompt = self.prompt_manager.get_planner_prompt()
-        
+        pm = PromptManager(cwd=cwd)
+        self.system_prompt = system_prompt if system_prompt else pm.get_system_prompt()
+        self.planner_prompt = pm.get_planner_prompt()
+        self.loaded_skills: dict[str, dict] = {}
+
         # Initialize LLM Service
         self.llm_service = LLMService()
         self.llm_service.set_active_provider(DEFAULT_PROVIDER)
-        
-        self.tool_registry = ToolRegistry()
-        self.model = DEFAULT_MODEL
-        self.last_request_cost = None  # Track cost of last request
-        
-        self.session_manager = SessionHistory()
-        # print("[INIT] Session manager initialized.")
 
-        # print("[INIT] Agent initialized successfully.")
-    
-    def set_mode(self, name : Literal["default", "plan"] = "default"):
+        self.tool_registry = tool_registry if tool_registry else ToolRegistry(cwd=cwd)
+        self.model = DEFAULT_MODEL
+
+        self.context_manager = ContextManager(
+            llm_service=self.llm_service,
+            model_context_size=200000,
+            model_name=self.model,
+        )
+
+        self.session_manager = SessionHistory()
+        self._load_model_preference()
+
+    def __repr__(self):
+        return f"Agent(id={self.id}, name={self.name})"
+
+    @property
+    def context(self):
+        return self.context_manager.context
+
+    @context.setter
+    def context(self, value):
+        self.context_manager.context = value
+        self.context_manager.update_context_size()
+
+    @property
+    def context_size(self):
+        return self.context_manager.context_size
+
+    @property
+    def model_context_size(self):
+        return self.context_manager.model_context_size
+
+    @model_context_size.setter
+    def model_context_size(self, value):
+        self.context_manager.model_context_size = value
+
+    def set_mode(self, name: Literal["default", "plan"] = "default"):
         if name == "plan":
             self.mode = "plan"
-            # Update the context with planner prompt if already initialized
             if self.context:
-                # Replace the system message (first message)
-                self.context[0] = {"role": "system", "content": self.planner_prompt}
+                self.context_manager.set_system_message(self.planner_prompt)
         else:
             self.mode = "default"
-            # Update the context with default system prompt if already initialized
             if self.context:
-                # Replace the system message (first message)
-                self.context[0] = {"role": "system", "content": self.system_prompt}
-    
-    def reset(self):
+                self.context_manager.set_system_message(self.system_prompt)
+
+    def init(
+        self,
+        status_callback=None,
+        todo_display_callback=None,
+        tool_call_callback=None,
+        stop_event=None,
+    ):
+        """Generate or update AGENTS.md for the current codebase."""
+        original_context = self.context.copy()
+        original_iteration = self.iteration
+        original_mode = self.mode
+        original_loaded_skills = self.loaded_skills.copy()
+
         self.context = []
-        self.session_manager.clear_session_history()
+        self.iteration = 0
+        self.mode = "default"
         self.add_system_message()
+
+        prompt = get_init_prompt()
+        try:
+            result = self.run(
+                prompt,
+                status_callback=status_callback,
+                todo_display_callback=todo_display_callback,
+                tool_call_callback=tool_call_callback,
+                stop_event=stop_event,
+            )
+        except Exception as e:
+            result = f"Error generating AGENTS.md: {e}"
+        finally:
+            # Restore the user's conversation state
+            self.context = original_context
+            self.iteration = original_iteration
+            self.mode = original_mode
+            self.loaded_skills = original_loaded_skills
+
+        if result.startswith("Error generating AGENTS.md"):
+            return result
+
+        result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL)
+        result = re.sub(r"<thinking>.*?</thinking>", "", result, flags=re.DOTALL)
+
+        filepath = os.path.join(os.getcwd(), "AGENTS.md")
+        try:
+            with open(filepath, "w") as f:
+                f.write(result)
+        except Exception as e:
+            return f"Error writing AGENTS.md: {e}"
+        return f"AGENTS.md generated successfully at {filepath}"
 
     def add_system_message(self, system_prompt: str = None):
         if system_prompt is None:
-            # Use prompt based on current mode
-            system_prompt = self.planner_prompt if self.mode == "plan" else self.system_prompt
-        message = {"role": "system", "content": system_prompt}
-        self.context.append(message)
+            system_prompt = (
+                self.planner_prompt if self.mode == "plan" else self.system_prompt
+            )
+        message = self.context_manager.add_message("system", system_prompt)
         self.session_manager.insert_to_session_history("system", json.dumps(message))
-    
+
+    @staticmethod
+    def _skill_message_content(skill: dict) -> str:
+        skill_name = skill.get("name", "unknown")
+        content = skill.get("content", "")
+        return f"{SKILL_MESSAGE_PREFIX} {skill_name}\n\n{content}"
+
+    @staticmethod
+    def _skill_name_from_message(message: dict) -> str | None:
+        content = message.get("content", "")
+        if message.get("role") != "system" or not content.startswith(SKILL_MESSAGE_PREFIX):
+            return None
+        first_line = content.splitlines()[0]
+        return first_line.removeprefix(SKILL_MESSAGE_PREFIX).strip() or None
+
+    def _restore_loaded_skills_from_context(self):
+        self.loaded_skills.clear()
+        for message in self.context:
+            skill_name = self._skill_name_from_message(message)
+            if skill_name:
+                self.loaded_skills[skill_name] = {"name": skill_name}
+
+    def get_loaded_skill_names(self) -> set[str]:
+        if not self.loaded_skills:
+            self._restore_loaded_skills_from_context()
+        return set(self.loaded_skills)
+
+    def load_skill(self, skill: dict) -> bool:
+        skill_name = skill.get("name", "unknown")
+        if skill_name in self.get_loaded_skill_names():
+            return False
+
+        if not self.context:
+            self.add_system_message()
+
+        message = self.context_manager.add_message(
+            "system",
+            self._skill_message_content(skill),
+        )
+        self.session_manager.insert_to_session_history("system", json.dumps(message))
+        self.loaded_skills[skill_name] = skill
+        return True
+
+    def annotate_skills(self, skills: list[dict]) -> list[dict]:
+        loaded_names = self.get_loaded_skill_names()
+        return [
+            {
+                **skill,
+                "loaded": skill.get("name") in loaded_names,
+            }
+            for skill in skills
+        ]
+
     def add_user_message(self, content):
-        message = {"role": "user", "content": content}
-        self.context.append(message)
+        message = self.context_manager.add_message("user", content)
         self.session_manager.insert_to_session_history("user", json.dumps(message))
 
+    def _load_model_preference(self):
+        saved_name = self.session_manager.get_preference("last_model")
+        if not saved_name:
+            return
+        if saved_name == self.model:
+            return
+        for m in self.available_models:
+            inst = m() if isinstance(m, type) else m
+            if inst.name == saved_name:
+                self.switch_model(inst)
+                return
+
     def switch_model(self, model):
-
         if model not in self.available_models:
-            return ValueError("Select the correct model")
+            raise ValueError("Select the correct model")
         self.model = model.name
-    
-    def add_assistant_message(self, content, tool_calls=None):
+        service_provider = "groq" if model.provider == "groq" else "openrouter"
+        self.llm_service.set_active_provider(service_provider)
+        self.context_manager.model_context_size = model.context_size
+        self.context_manager.model_name = model.name
+        self.session_manager.set_preference("last_model", model.name)
 
-        message = {"role": "assistant", "content": content}
+    def add_assistant_message(self, content, tool_calls=None):
+        extra = {}
         if tool_calls:
-           
-            message["tool_calls"] = [
+            extra["tool_calls"] = [
                 {
                     "id": tc.id,
                     "type": "function",
                     "function": {
                         "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
+                        "arguments": tc.function.arguments,
+                    },
                 }
                 for tc in (tool_calls if isinstance(tool_calls, list) else [tool_calls])
             ]
-        self.context.append(message)
+        message = self.context_manager.add_message("assistant", content, **extra)
         self.session_manager.insert_to_session_history("assistant", json.dumps(message))
 
     def add_tool_message(self, tool_call, tool_output):
-        message = {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "name": tool_call.function.name,
-            "content": tool_output
-        }
-        self.context.append(message)
+        message = self.context_manager.add_message(
+            "tool",
+            tool_output,
+            tool_call_id=tool_call.id,
+            name=tool_call.function.name,
+        )
         self.session_manager.insert_to_session_history("tool", json.dumps(message))
-    
+
     def update_context_size(self):
-        self.message_context_size = [len(message["content"]) for message in self.context]
-        self.context_size = sum(self.message_context_size)
-        # print(f"[CONTEXT] Updated context size: {self.context_size}")
+        self.context_manager.update_context_size()
+
+    def _maybe_compact_context(self, status_callback=None):
+        if self.context_manager.should_compact(TOOL_TRIM_THRESHOLD_RATIO):
+            removed = self.context_manager.trim_raw_tool_outputs()
+            if removed and status_callback:
+                status_callback(f"trimmed {removed} tool outputs", is_thinking=False)
+
+        if self.context_manager.should_compact(COMPACTION_THRESHOLD_RATIO):
+            if status_callback:
+                status_callback("compacting context", is_thinking=False)
+            result = self.context_manager.compact()
+            if result and status_callback:
+                status_callback(
+                    f"Context compacted: {result['before_count']} → {result['after_count']} messages",
+                    is_thinking=False,
+                    is_alert=True,
+                )
 
     def get_session_history(self, limit=None):
         return self.session_manager.retrieve_session_history(limit)
-    
-    def get_chat_history(self, name=None, chat_id=None, limit=None):
-        return self.session_manager.retrieve_chat_history(name, chat_id, limit)
-    
-    def save_session(self, name):
-        session_messages = self.session_manager.retrieve_session_history()
-        parsed_messages = []
-        for msg in session_messages:
-            try:
-                parsed_messages.append(json.loads(msg["content"]))
-            except json.JSONDecodeError:
-                parsed_messages.append({"role": msg["role"], "content": msg["content"]})
-        
-        return self.session_manager.insert_to_chat_history(name, parsed_messages)
-    
+
     def clear_session(self):
         self.session_manager.clear_session_history()
-        self.context = []
+        self.context_manager.clear()
+        self.loaded_skills.clear()
         self.iteration = 0
         self.add_system_message()
-    
+
     def load_session(self, name):
         chat_history = self.session_manager.retrieve_chat_history(name=name, limit=1)
         if chat_history:
             self.clear_session()
             for message in chat_history[0]["chat_history"]:
-                self.context.append(message)
-                self.session_manager.insert_to_session_history(message["role"], json.dumps(message))
-            # print(f"[SESSION] Loaded session '{name}' with {len(self.context)} messages.")
+                self.context_manager.add_message(
+                    message["role"], message.get("content", ""),
+                    **{k: v for k, v in message.items() if k not in ("role", "content")},
+                )
+                self.session_manager.insert_to_session_history(
+                    message["role"], json.dumps(message)
+                )
+            self._restore_loaded_skills_from_context()
             return True
-        # print(f"[SESSION] No session found with name '{name}'.")
         return False
 
     def display_tool(self, tool_name: str, tool_args: dict = None):
         """Generate a descriptive message for tool usage with specific arguments"""
-        
+
         if tool_args is None:
             tool_args = {}
-        
+
         # Generate specific messages based on tool and arguments
+        if tool_name == ASK_QUESTION_TOOL_NAME:
+            questions = tool_args.get("questions") or []
+            count = len(questions)
+            if count == 1:
+                return "asking a clarifying question"
+            return f"asking {count} clarifying questions"
+
         if tool_name == "file_reader" and "file_path" in tool_args:
-            filename = tool_args["file_path"].split('/')[-1]
+            filename = tool_args["file_path"].split("/")[-1]
             return f"reading {filename}"
-        
-        elif tool_name == "file_creator" and "file_path" in tool_args:
-            filename = tool_args["file_path"].split('/')[-1]
-            return f"creating {filename}"
-        
-        elif tool_name == "file_editor" and "file_path" in tool_args:
-            filename = tool_args["file_path"].split('/')[-1]
-            return f"editing {filename}"
-        
-        elif tool_name == "multi_edit" and "file_path" in tool_args:
-            filename = tool_args["file_path"].split('/')[-1]
-            return f"performing multuple edits in {filename}"
-        
-        elif tool_name == "multiple_file_reader" and "file_paths" in tool_args:
-            count = len(tool_args["file_paths"])
+
+        elif tool_name == "file_reader" and "files" in tool_args:
+            count = len(tool_args["files"])
             return f"reading {count} file{'s' if count > 1 else ''}"
-        
+
+        elif tool_name == "file_creator" and "file_path" in tool_args:
+            filename = tool_args["file_path"].split("/")[-1]
+            return f"creating {filename}"
+
+        elif tool_name == "file_editor" and "file_path" in tool_args:
+            filename = tool_args["file_path"].split("/")[-1]
+            if "old_strings" in tool_args:
+                return f"performing multiple edits in {filename}"
+            return f"editing {filename}"
+
         elif tool_name == "grep_search" and "pattern" in tool_args:
             pattern = tool_args["pattern"][:30]  # Truncate long patterns
             return f"searching for '{pattern}'"
-        
-        elif tool_name == "command_executor" and "command" in tool_args:
-            cmd = tool_args["command"]  # Get first word of command
-            return f"executing {cmd}"
-        
-        elif tool_name == "ls" and "directory" in tool_args:
-            dir_name = tool_args["directory"].split('/')[-1] or "root"
+
+        elif tool_name == "glob" and "pattern" in tool_args:
+            pattern = tool_args["pattern"][:30]
+            return f"finding files matching '{pattern}'"
+
+        elif tool_name == "bash" and "command" in tool_args:
+            return "executing bash command"
+
+        elif tool_name == "ls" and "directory_path" in tool_args:
+            dir_name = tool_args["directory_path"].split("/")[-1] or "root"
             return f"listing {dir_name}"
-        
+
         elif tool_name == "web_search" and "query" in tool_args:
             query = tool_args["query"][:30]  # Truncate long queries
             return f"searching web for '{query}'"
-        
-        elif tool_name == "todo" and "task" in tool_args:
+
+        elif tool_name == "sandbox" and "code" in tool_args:
+            language = tool_args.get("language", "python")
+            return f"running {language} code in sandbox"
+
+        elif tool_name == "subagent" and "task" in tool_args:
+            task = tool_args["task"][:40]
+            return f"delegating: {task}"
+
+        elif tool_name in ("todo_write", "todo_update") and "task" in tool_args:
             task = tool_args["task"][:40]  # Truncate long task names
             status = tool_args.get("status", "pending")
-            if status == "completed":
+            if tool_name == "todo_write":
+                return f"adding task: {task}"
+            elif status == "completed":
                 return f"completing task: {task}"
             elif status == "in_progress":
                 return f"starting task: {task}"
             else:
-                return f"adding task: {task}"
-        
+                return f"updating task: {task}"
+
+        elif tool_name == "todo_read":
+            return "reading todos"
+
         # Fallback to generic messages
         tool_message = {
             "grep_search": "searching",
+            "glob": "finding files",
             "file_reader": "reading",
-            "command_executor": "executing",
-            "todo": "managing todos",
+            "bash": "executing",
+            "todo_write": "writing todos",
+            "todo_read": "reading todos",
+            "todo_update": "updating todos",
             "file_creator": "creating file",
             "file_editor": "editing file",
-            "multiple_file_reader": "reading files",
             "ls": "listing directory",
-            "sub_agent": "delegating to sub-agent",
-            "lint": "linting code",
+            "subagent": "delegating to sub-agent",
             "web_search": "searching the web",
         }
-        
+
         return tool_message.get(tool_name, "calling tool")
 
-    def run(self, user_message, status_callback=None, streaming_callback=None, todo_display_callback=None):
+    def _tool_schemas_for_current_mode(self):
+        if self.mode == "plan":
+            return self.tool_registry.plan_tool_schemas
+        return self.tool_registry.tool_schemas
+
+    def _run_tool_for_current_turn(self, tool_name: str, is_plan_mode: bool, **kwargs):
+        if is_plan_mode:
+            return self.tool_registry.run_plan_tool(tool_name, **kwargs)
+        return self.tool_registry.run_tool(tool_name, **kwargs)
+
+    async def _run_tool_for_current_turn_async(
+        self,
+        tool_name: str,
+        is_plan_mode: bool,
+        **kwargs,
+    ):
+        if is_plan_mode:
+            return await self.tool_registry.run_plan_tool_async(tool_name, **kwargs)
+        return await self.tool_registry.run_tool_async(tool_name, **kwargs)
+
+    def _try_complete_ask_question_turn(
+        self,
+        parsed_calls,
+        final_tool_calls,
+        is_plan_mode: bool,
+        tool_call_callback=None,
+        status_callback=None,
+        trace=None,
+    ) -> str | None:
+        question_call = next(
+            (
+                (tool_call, tool_args)
+                for tool_call, tool_args in parsed_calls
+                if tool_call.function.name == ASK_QUESTION_TOOL_NAME
+            ),
+            None,
+        )
+        if question_call is None:
+            return None
+
+        tool_call, tool_args = question_call
+        question_output = self._run_tool_for_current_turn(
+            tool_call.function.name,
+            is_plan_mode,
+            **tool_args,
+        )
+        if tool_call_callback:
+            tool_call_callback(
+                tool_name=tool_call.function.name,
+                label=self.display_tool(tool_call.function.name, tool_args),
+                args=tool_args,
+            )
+        elif status_callback:
+            status_callback(self.display_tool(tool_call.function.name, tool_args), is_thinking=False)
+
+        self.add_assistant_message(content="", tool_calls=final_tool_calls)
+        for current_tool_call, _ in parsed_calls:
+            if current_tool_call.id == tool_call.id:
+                self.add_tool_message(current_tool_call, question_output)
+            else:
+                self.add_tool_message(
+                    current_tool_call,
+                    "Skipped because ask_question ended the turn and is waiting for the user's answer.",
+                )
+        self.add_assistant_message(question_output)
+        self.update_context_size()
+
+        if is_plan_mode:
+            self.set_mode(name="default")
+        if trace:
+            try:
+                trace.update(
+                    output={
+                        "response": question_output,
+                        "iterations": self.iteration + 1,
+                        "ended_by": ASK_QUESTION_TOOL_NAME,
+                    }
+                )
+            except Exception as le:
+                print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
+        return question_output
+
+    def run(
+        self,
+        user_message,
+        status_callback=None,
+        todo_display_callback=None,
+        tool_call_callback=None,
+        tool_output_callback=None,
+        stop_event: Optional[Event] = None,
+        worker_event_callback=None,
+        stream_callback=None,
+    ):
         """
         Run the agent with a user message
-        
+
         Args:
             user_message: The user's input message
-            status_callback: Optional callback function to update status (e.g., status_callback("reading file.txt"))
-            streaming_callback: Optional callback function to receive streaming content chunks
+            status_callback: Optional callback function to update status
             todo_display_callback: Optional callback function to display todo list updates
+            worker_event_callback: Optional callback function to emit worker lifecycle events
         """
         # print(f"[RUN] Starting agent run with user message: '{user_message}'")
+
+        stop_event = stop_event or Event()
+
+        # Respect any pending stop requests before starting
+        if stop_event.is_set():
+            raise KeyboardInterrupt()
 
         # Check if user wants to use planning mode
         is_plan_mode = user_message.strip().startswith("/plan")
         if is_plan_mode:
-            self.set_mode(name = "plan")
+            self.set_mode(name="plan")
             task = user_message.replace("/plan", "", 1).strip()
             user_message = f"Plan this feature {task}"
-            
+
             # Notify user about mode switch
             if status_callback:
                 status_callback("switched to plan mode", is_thinking=False)
-        
+
         if not self.context:
             self.add_system_message()
             # print("[INIT] System prompt added to context.")
 
         self.add_user_message(user_message)
+        self.update_context_size()
+        self.iteration = 0
 
-        while self.iteration < self.max_iterations:
-            # print(f"[ITERATION] Iteration {self.iteration + 1}/{self.max_iterations}")
-
+        # Create Langfuse trace if observability is enabled
+        lf_client = lf_obs.get_langfuse_client()
+        trace = None
+        if lf_client:
             try:
-                # Get tool schemas for LLM
-                tool_schemas = self.tool_registry.tool_schemas
-                
-                # Stream response from LLM
-                accumulated_content = ""
-                accumulated_reasoning = ""
-                final_tool_calls = None
-                
-                for chunk in self.llm_service.stream(
-                    messages=self.context,
-                    tools=tool_schemas,
-                    tool_choice="auto",
-                    model_name=self.model,
-                    temperature=0.3
-                ):
-                    if chunk.reasoning:
-                        accumulated_reasoning += chunk.reasoning
-                        
-                        # Only call callback if there's actual content (not just whitespace)
-                        if status_callback and chunk.reasoning.strip():
-                            status_callback(chunk.reasoning, is_thinking=True)
-                    
-                    # Accumulate content but don't stream it during tool calls
-                    # Only stream the final response to the user
-                    if chunk.content:
-                        accumulated_content += chunk.content
-                    
-           
-                    # Capture tool calls (usually come in final chunk)
-                    if chunk.tool_calls:
-                        final_tool_calls = chunk.tool_calls
-
-                # print("[LLM] LLM response received.")
+                trace = lf_client.trace(
+                    name="agent-run",
+                    input={"user_message": user_message, "mode": self.mode},
+                    session_id=self.session_manager.get_session_id(),
+                    metadata={
+                        "model": self.model,
+                        "provider": self.llm_service.active_provider_name,
+                        "max_iterations": self.max_iterations,
+                    },
+                )
             except Exception as e:
-                # print(f"[ERROR] Failed to call LLM: {e}")
-                return f"Error occurred while calling LLM due to {e}"
+                print(f"[Langfuse] Failed to create trace: {e}", file=sys.stderr)
 
-            # Check if we have tool calls
-            if final_tool_calls and len(final_tool_calls) > 0:
-                tool_call = final_tool_calls[0]
-                # print(f"[TOOL] Detected tool call: {tool_call.function.name}")
+        try:
+            while self.iteration < self.max_iterations:
+                # print(f"[ITERATION] Iteration {self.iteration + 1}/{self.max_iterations}")
 
-                try:
-                    tool_args = json.loads(tool_call.function.arguments)
-                    # print(f"[TOOL] Parsed tool arguments: {tool_args}")
-                except json.JSONDecodeError:
-                    # print("[ERROR] Failed to parse tool arguments as JSON")
-                    return "Error: Invalid tool arguments format."
-
-                # Update status with specific tool message
-                if status_callback:
-                    status_message = self.display_tool(tool_call.function.name, tool_args)
-                    status_callback(status_message, is_thinking=False)
+                if stop_event.is_set():
+                    raise KeyboardInterrupt()
 
                 try:
-                    # Pass status_callback to tools that support it
-                    # Only pass to specific tools that accept this parameter
-                    tools_supporting_callback = ['file_editor']
-                    tool_kwargs = {**tool_args}
-                    if status_callback and tool_call.function.name in tools_supporting_callback:
-                        tool_kwargs['status_callback'] = status_callback
-                    tool_output = self.tool_registry.run_tool(tool_call.function.name, **tool_kwargs)
-                    # print(f"[TOOL] Tool '{tool_call.function.name}' executed successfully.")
-                    
-                    # If this is a todo tool call, display the todo list
-                    if tool_call.function.name == "todo" and todo_display_callback:
-                        try:
-                            todo_data = json.loads(tool_output)
-                            if "items" in todo_data:
-                                todo_display_callback(todo_data["items"])
-                        except (json.JSONDecodeError, KeyError):
-                            pass  # Silently fail if todo output is not in expected format
-                    
-                    # Note: accumulated_content was already streamed during the loop above
-                    # No need to send it again via streaming_callback as it would duplicate content
-                    
-                    # For file_creator, add to streaming output
-                    if streaming_callback and tool_call.function.name in ["file_creator"]:
-                        streaming_callback("\n\n")
-                        streaming_callback(tool_output)
-                    
+                    # Compact context if approaching the model's limit
+                    self._maybe_compact_context(status_callback=status_callback)
+
+                    # Get tool schemas for LLM
+                    tool_schemas = self._tool_schemas_for_current_mode()
+
+                    # Non-streaming response from LLM
+                    response = self.llm_service.generate(
+                        messages=self.context,
+                        tools=tool_schemas,
+                        tool_choice="auto",
+                        model_name=self.model,
+                        temperature=0.3,
+                        trace=trace,
+                    )
+
+                    if stop_event.is_set():
+                        raise KeyboardInterrupt()
+
+                    if response.reasoning:
+                        if status_callback and response.reasoning.strip():
+                            status_callback(response.reasoning, is_thinking=True)
+
+                    accumulated_content = response.content or ""
+                    final_tool_calls = response.tool_calls or []
+
+                    # print("[LLM] LLM response received.")
                 except Exception as e:
-                    # print(f"[ERROR] Tool execution failed: {e}")
-                    tool_error = f"Error executing tool: {str(e)}"
-                    self.add_assistant_message(content=accumulated_content, tool_calls=[tool_call])
-                    self.add_tool_message(tool_call, tool_error)
+                    # print(f"[ERROR] Failed to call LLM: {e}")
+                    if trace:
+                        try:
+                            trace.update(output={"error": str(e)})
+                        except Exception as le:
+                            print(
+                                f"[Langfuse] Failed to update trace: {le}",
+                                file=sys.stderr,
+                            )
+                    return f"Error occurred while calling LLM due to {e}"
+
+                # Check if we have tool calls
+                if final_tool_calls and len(final_tool_calls) > 0:
+                    # Parse all tool arguments first
+                    parsed_calls = []
+                    for tool_call in final_tool_calls:
+                        try:
+                            tool_args = json.loads(tool_call.function.arguments)
+                            parsed_calls.append((tool_call, tool_args))
+                        except json.JSONDecodeError:
+                            if status_callback:
+                                status_callback(f"skipped malformed tool call: {tool_call.function.name}", is_thinking=False)
+                            continue
+
+                    ask_question_result = self._try_complete_ask_question_turn(
+                        parsed_calls,
+                        final_tool_calls,
+                        is_plan_mode,
+                        tool_call_callback=tool_call_callback,
+                        status_callback=status_callback,
+                        trace=trace,
+                    )
+                    if ask_question_result is not None:
+                        return ask_question_result
+
+                    # Update status for each tool call
+                    for tool_call, tool_args in parsed_calls:
+                        status_message = self.display_tool(
+                            tool_call.function.name, tool_args
+                        )
+                        if tool_call_callback:
+                            tool_call_callback(
+                                tool_name=tool_call.function.name,
+                                label=status_message,
+                                args=tool_args,
+                            )
+                        elif status_callback:
+                            status_callback(status_message, is_thinking=False)
+
+                    # Execute all tools and collect outputs
+                    tool_results = []
+                    for tool_call, tool_args in parsed_calls:
+                        try:
+                            if stop_event.is_set():
+                                raise KeyboardInterrupt()
+
+                            # Create span for tool execution if tracing
+                            tool_span = None
+                            if trace:
+                                try:
+                                    tool_span = trace.span(
+                                        name=tool_call.function.name,
+                                        input=tool_args,
+                                    )
+                                except Exception as le:
+                                    print(
+                                        f"[Langfuse] Failed to create tool span: {le}",
+                                        file=sys.stderr,
+                                    )
+
+                            worker_id = None
+                            if tool_call.function.name == "subagent" and not is_plan_mode:
+                                self._subagent_counter += 1
+                                worker_id = f"subagent-{self._subagent_counter}"
+                                task_description = tool_args.get("task", "")
+
+                                if worker_event_callback:
+                                    worker_event_callback(
+                                        "worker_spawned",
+                                        {
+                                            "worker_id": worker_id,
+                                            "name": worker_id,
+                                            "description": task_description,
+                                            "role": "subagent",
+                                        },
+                                    )
+
+                                def _make_wrapped_callback(wid, orig_cb, we_cb):
+                                    def _wrapped(message, is_thinking=False, **kwargs):
+                                        if orig_cb and not we_cb:
+                                            orig_cb(message, is_thinking=is_thinking, **kwargs)
+                                        if we_cb:
+                                            if is_thinking:
+                                                we_cb(
+                                                    "worker_detail",
+                                                    {
+                                                        "worker_id": wid,
+                                                        "detail_type": "thinking",
+                                                        "content": message,
+                                                        "timestamp": time.time(),
+                                                    },
+                                                )
+                                            else:
+                                                we_cb(
+                                                    "worker_notification",
+                                                    {
+                                                        "worker_id": wid,
+                                                        "status": "running",
+                                                        "summary": message,
+                                                        "timestamp": time.time(),
+                                                    },
+                                                )
+                                    return _wrapped
+
+                                def _make_wrapped_tool_call_callback(wid, orig_cb, we_cb):
+                                    def _wrapped(tool_name, label, args):
+                                        if orig_cb and not we_cb:
+                                            orig_cb(tool_name, label, args)
+                                        if we_cb:
+                                            we_cb(
+                                                "worker_detail",
+                                                {
+                                                    "worker_id": wid,
+                                                    "detail_type": "tool_call",
+                                                    "content": label,
+                                                    "tool_name": tool_name,
+                                                    "args": args,
+                                                    "timestamp": time.time(),
+                                                },
+                                            )
+                                    return _wrapped
+
+                                def _make_wrapped_tool_output_callback(wid, we_cb):
+                                    def _wrapped(tool_name, output):
+                                        if we_cb:
+                                            we_cb(
+                                                "worker_detail",
+                                                {
+                                                    "worker_id": wid,
+                                                    "detail_type": "tool_output",
+                                                    "content": str(output),
+                                                    "tool_name": tool_name,
+                                                    "timestamp": time.time(),
+                                                },
+                                            )
+                                    return _wrapped
+
+                                tool_args["_status_callback"] = _make_wrapped_callback(
+                                    worker_id, status_callback, worker_event_callback
+                                )
+                                tool_args["_tool_call_callback"] = _make_wrapped_tool_call_callback(
+                                    worker_id, tool_call_callback, worker_event_callback
+                                )
+                                tool_args["_tool_output_callback"] = _make_wrapped_tool_output_callback(
+                                    worker_id, worker_event_callback
+                                )
+                                tool_args["_stop_event"] = stop_event
+
+                            if tool_call.function.name == "send_notification" and not is_plan_mode:
+                                tool_args["_notification_callback"] = self._notification_callback
+                                tool_args["_agent_id"] = self.id
+
+                            if tool_call.function.name == "load_skill":
+                                tool_args["_agent"] = self
+
+                            tool_output = self._run_tool_for_current_turn(
+                                tool_call.function.name,
+                                is_plan_mode,
+                                **tool_args,
+                            )
+                            # print(f"[TOOL] Tool '{tool_call.function.name}' executed successfully.")
+
+                            if tool_output_callback:
+                                tool_output_callback(tool_call.function.name, tool_output)
+
+                            if tool_span:
+                                try:
+                                    tool_span.end(output=tool_output)
+                                except Exception as le:
+                                    print(
+                                        f"[Langfuse] Failed to end tool span: {le}",
+                                        file=sys.stderr,
+                                    )
+
+                            # If this is a todo tool call, display the todo list
+                            if (
+                                tool_call.function.name in ("todo_write", "todo_update", "todo_read")
+                                and todo_display_callback
+                            ):
+                                try:
+                                    todo_data = json.loads(tool_output)
+                                    if "items" in todo_data:
+                                        todo_display_callback(todo_data["items"])
+                                except (json.JSONDecodeError, KeyError):
+                                    pass  # Silently fail if todo output is not in expected format
+
+                            # Emit worker_status for completed subagent
+                            if worker_id and worker_event_callback:
+                                worker_event_callback(
+                                    "worker_status",
+                                    {
+                                        "worker_id": worker_id,
+                                        "status": "completed",
+                                        "result": str(tool_output),
+                                        "timestamp": time.time(),
+                                    },
+                                )
+
+                            tool_results.append((tool_call, tool_output, False))
+                        except Exception as e:
+                            # print(f"[ERROR] Tool execution failed: {e}")
+                            tool_error = f"Error executing tool: {str(e)}"
+                            if tool_span:
+                                try:
+                                    tool_span.end(output={"error": str(e)})
+                                except Exception as le:
+                                    print(
+                                        f"[Langfuse] Failed to end tool span: {le}",
+                                        file=sys.stderr,
+                                    )
+
+                            # Emit worker_status for failed subagent
+                            if worker_id and worker_event_callback:
+                                worker_event_callback(
+                                    "worker_status",
+                                    {
+                                        "worker_id": worker_id,
+                                        "status": "failed",
+                                        "result": str(e),
+                                        "timestamp": time.time(),
+                                    },
+                                )
+
+                            tool_results.append((tool_call, tool_error, True))
+
+                    # Add assistant message with all tool calls
+                    self.add_assistant_message(
+                        content=accumulated_content, tool_calls=final_tool_calls
+                    )
+
+                    # Add all tool messages
+                    for tool_call, output, _ in tool_results:
+                        self.add_tool_message(tool_call, output)
+
                     self.update_context_size()
                     self.iteration += 1
-                    continue
 
-                self.add_assistant_message(content=accumulated_content, tool_calls=[tool_call])
-                self.add_tool_message(tool_call, tool_output)
-                self.update_context_size()
-                self.iteration += 1
+                else:
+                    # print("[LLM] No tool calls detected. Returning final response.")
+                    # print(f"[OUTPUT] Final content: {accumulated_content[:200]}{'...' if len(accumulated_content) > 200 else ''}")
 
-            else:
-                # print("[LLM] No tool calls detected. Returning final response.")
-                # print(f"[OUTPUT] Final content: {accumulated_content[:200]}{'...' if len(accumulated_content) > 200 else ''}")
-                
-                # Stream the final response to the user
-                if streaming_callback and accumulated_content:
-                    streaming_callback(accumulated_content)
-                
-                self.add_assistant_message(accumulated_content)
-                self.update_context_size()
-                
-                # Reset mode back to default if this was a /plan query
-                if is_plan_mode:
-                    self.set_mode(name="default")
-                
-                return accumulated_content
+                    self.add_assistant_message(accumulated_content)
+                    self.update_context_size()
 
-        # print("[STOP] Max iterations reached. Terminating process.")
-        # Reset mode back to default if this was a /plan query
+                    # Reset mode back to default if this was a /plan query
+                    if is_plan_mode:
+                        self.set_mode(name="default")
+
+                    if trace:
+                        try:
+                            trace.update(
+                                output={
+                                    "response": accumulated_content,
+                                    "iterations": self.iteration + 1,
+                                }
+                            )
+                        except Exception as le:
+                            print(
+                                f"[Langfuse] Failed to update trace: {le}",
+                                file=sys.stderr,
+                            )
+
+                    return accumulated_content
+
+            # print("[STOP] Max iterations reached. Terminating process.")
+            # Reset mode back to default if this was a /plan query
+            if is_plan_mode:
+                self.set_mode(name="default")
+
+            if trace:
+                try:
+                    trace.update(
+                        output={
+                            "error": "Max iterations reached",
+                            "iterations": self.iteration,
+                        }
+                    )
+                except Exception as le:
+                    print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
+
+            return "Max iterations reached. Process terminated."
+        finally:
+            if trace:
+                try:
+                    lf_obs.flush()
+                except Exception as le:
+                    print(f"[Langfuse] Failed to flush trace: {le}", file=sys.stderr)
+
+    async def arun(
+        self,
+        user_message,
+        status_callback=None,
+        todo_display_callback=None,
+        tool_call_callback=None,
+        tool_output_callback=None,
+        stop_event=None,
+        worker_event_callback=None,
+    ):
+        """
+        Async version of run(). Executes tool calls concurrently.
+        """
+        stop_event = stop_event or asyncio.Event()
+
+        if stop_event.is_set():
+            raise KeyboardInterrupt()
+
+        is_plan_mode = user_message.strip().startswith("/plan")
         if is_plan_mode:
-            self.set_mode(name="default")
-        return "Max iterations reached. Process terminated."
+            self.set_mode(name="plan")
+            task = user_message.replace("/plan", "", 1).strip()
+            user_message = f"Plan this feature {task}"
+            if status_callback:
+                status_callback("switched to plan mode", is_thinking=False)
 
-    def __del__(self):
-        if hasattr(self, 'session_manager'):
-            self.session_manager.close()
+        if not self.context:
+            self.add_system_message()
 
-if __name__ == "__main__":
-    agent = Agent()
-    result = agent.run("in which file is the main agent logic defined")
-    #print(f"\n[FINAL RESULT] {result}")
+        self.add_user_message(user_message)
+        self.update_context_size()
+        self.iteration = 0
+
+        lf_client = lf_obs.get_langfuse_client()
+        trace = None
+        if lf_client:
+            try:
+                trace = lf_client.trace(
+                    name="agent-run-async",
+                    input={"user_message": user_message, "mode": self.mode},
+                    session_id=self.session_manager.get_session_id(),
+                    metadata={
+                        "model": self.model,
+                        "provider": self.llm_service.active_provider_name,
+                        "max_iterations": self.max_iterations,
+                    },
+                )
+            except Exception as e:
+                print(f"[Langfuse] Failed to create trace: {e}", file=sys.stderr)
+
+        try:
+            while self.iteration < self.max_iterations:
+                if stop_event.is_set():
+                    raise KeyboardInterrupt()
+
+                try:
+                    self._maybe_compact_context(status_callback=status_callback)
+                    tool_schemas = self._tool_schemas_for_current_mode()
+
+                    response = await self.llm_service.agenerate(
+                        messages=self.context,
+                        tools=tool_schemas,
+                        tool_choice="auto",
+                        model_name=self.model,
+                        temperature=0.3,
+                        trace=trace,
+                    )
+
+                    if stop_event.is_set():
+                        raise KeyboardInterrupt()
+
+                    if response.reasoning:
+                        if status_callback and response.reasoning.strip():
+                            status_callback(response.reasoning, is_thinking=True)
+
+                    accumulated_content = response.content or ""
+                    final_tool_calls = response.tool_calls or []
+                except Exception as e:
+                    if trace:
+                        try:
+                            trace.update(output={"error": str(e)})
+                        except Exception as le:
+                            print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
+                    return f"Error occurred while calling LLM due to {e}"
+
+                if final_tool_calls and len(final_tool_calls) > 0:
+                    parsed_calls = []
+                    for tool_call in final_tool_calls:
+                        try:
+                            tool_args = json.loads(tool_call.function.arguments)
+                            parsed_calls.append((tool_call, tool_args))
+                        except json.JSONDecodeError:
+                            if status_callback:
+                                status_callback(f"skipped malformed tool call: {tool_call.function.name}", is_thinking=False)
+                            continue
+
+                    ask_question_result = self._try_complete_ask_question_turn(
+                        parsed_calls,
+                        final_tool_calls,
+                        is_plan_mode,
+                        tool_call_callback=tool_call_callback,
+                        status_callback=status_callback,
+                        trace=trace,
+                    )
+                    if ask_question_result is not None:
+                        return ask_question_result
+
+                    for tool_call, tool_args in parsed_calls:
+                        status_message = self.display_tool(tool_call.function.name, tool_args)
+                        if tool_call_callback:
+                            tool_call_callback(
+                                tool_name=tool_call.function.name,
+                                label=status_message,
+                                args=tool_args,
+                            )
+                        elif status_callback:
+                            status_callback(status_message, is_thinking=False)
+
+                    async def _execute_one(tool_call, tool_args, worker_id=None):
+                        if stop_event.is_set():
+                            raise KeyboardInterrupt()
+
+                        tool_span = None
+                        if trace:
+                            try:
+                                tool_span = trace.span(name=tool_call.function.name, input=tool_args)
+                            except Exception as le:
+                                print(f"[Langfuse] Failed to create tool span: {le}", file=sys.stderr)
+
+                        if tool_call.function.name == "subagent" and not is_plan_mode:
+                            task_description = tool_args.get("task", "")
+
+                            if worker_event_callback:
+                                worker_event_callback(
+                                    "worker_spawned",
+                                    {
+                                        "worker_id": worker_id,
+                                        "name": worker_id,
+                                        "description": task_description,
+                                    },
+                                )
+
+                            def _make_wrapped_callback(wid, orig_cb, we_cb):
+                                def _wrapped(message, is_thinking=False, **kwargs):
+                                    if orig_cb and not we_cb:
+                                        orig_cb(message, is_thinking=is_thinking, **kwargs)
+                                    if we_cb:
+                                        if is_thinking:
+                                            we_cb(
+                                                "worker_detail",
+                                                {
+                                                    "worker_id": wid,
+                                                    "detail_type": "thinking",
+                                                    "content": message,
+                                                },
+                                            )
+                                        else:
+                                            we_cb(
+                                                "worker_notification",
+                                                {
+                                                    "worker_id": wid,
+                                                    "status": "running",
+                                                    "summary": message,
+                                                },
+                                            )
+                                return _wrapped
+
+                            def _make_wrapped_tool_call_callback(wid, orig_cb, we_cb):
+                                def _wrapped(tool_name, label, args):
+                                    if orig_cb and not we_cb:
+                                        orig_cb(tool_name, label, args)
+                                    if we_cb:
+                                        we_cb(
+                                            "worker_detail",
+                                            {
+                                                "worker_id": wid,
+                                                "detail_type": "tool_call",
+                                                "content": label,
+                                                "tool_name": tool_name,
+                                                "args": args,
+                                            },
+                                        )
+                                return _wrapped
+
+                            def _make_wrapped_tool_output_callback(wid, we_cb):
+                                def _wrapped(tool_name, output):
+                                    if we_cb:
+                                        we_cb(
+                                            "worker_detail",
+                                            {
+                                                "worker_id": wid,
+                                                "detail_type": "tool_output",
+                                                "content": str(output),
+                                                "tool_name": tool_name,
+                                            },
+                                        )
+                                return _wrapped
+
+                            tool_args["_status_callback"] = _make_wrapped_callback(
+                                worker_id, status_callback, worker_event_callback
+                            )
+                            tool_args["_tool_call_callback"] = _make_wrapped_tool_call_callback(
+                                worker_id, tool_call_callback, worker_event_callback
+                            )
+                            tool_args["_tool_output_callback"] = _make_wrapped_tool_output_callback(
+                                worker_id, worker_event_callback
+                            )
+                            tool_args["_stop_event"] = stop_event
+
+                        if tool_call.function.name == "send_notification" and not is_plan_mode:
+                            tool_args["_notification_callback"] = self._notification_callback
+                            tool_args["_agent_id"] = self.id
+
+                        if tool_call.function.name == "load_skill":
+                            tool_args["_agent"] = self
+
+                        try:
+                            tool_output = await self._run_tool_for_current_turn_async(
+                                tool_call.function.name,
+                                is_plan_mode,
+                                **tool_args,
+                            )
+                            if tool_output_callback:
+                                tool_output_callback(tool_call.function.name, tool_output)
+                            if worker_id and worker_event_callback:
+                                worker_event_callback(
+                                    "worker_status",
+                                    {
+                                        "worker_id": worker_id,
+                                        "status": "completed",
+                                        "result": str(tool_output),
+                                    },
+                                )
+                        except Exception as e:
+                            tool_output = f"Error executing tool: {str(e)}"
+                            if tool_output_callback:
+                                tool_output_callback(tool_call.function.name, tool_output)
+                            if worker_id and worker_event_callback:
+                                worker_event_callback(
+                                    "worker_status",
+                                    {
+                                        "worker_id": worker_id,
+                                        "status": "failed",
+                                        "result": str(e),
+                                    },
+                                )
+
+                        if tool_span:
+                            try:
+                                tool_span.end(output=tool_output)
+                            except Exception as le:
+                                print(f"[Langfuse] Failed to end tool span: {le}", file=sys.stderr)
+
+                        if tool_call.function.name in ("todo_write", "todo_update", "todo_read") and todo_display_callback:
+                            try:
+                                todo_data = json.loads(tool_output)
+                                if "items" in todo_data:
+                                    todo_display_callback(todo_data["items"])
+                            except (json.JSONDecodeError, KeyError):
+                                pass
+
+                        return tool_call, tool_output
+
+                    coros = []
+                    for tc, ta in parsed_calls:
+                        wid = None
+                        if tc.function.name == "subagent":
+                            self._subagent_counter += 1
+                            wid = f"subagent-{self._subagent_counter}"
+                        coros.append(_execute_one(tc, ta, wid))
+
+                    results = await asyncio.gather(
+                        *coros,
+                        return_exceptions=True,
+                    )
+
+                    self.add_assistant_message(content=accumulated_content, tool_calls=final_tool_calls)
+                    for res in results:
+                        if isinstance(res, Exception):
+                            # Log but continue; the tool error is embedded in the output
+                            continue
+                        tool_call, output = res
+                        self.add_tool_message(tool_call, output)
+
+                    self.update_context_size()
+                    self.iteration += 1
+                else:
+                    self.add_assistant_message(accumulated_content)
+                    self.update_context_size()
+
+                    if is_plan_mode:
+                        self.set_mode(name="default")
+
+                    if trace:
+                        try:
+                            trace.update(
+                                output={
+                                    "response": accumulated_content,
+                                    "iterations": self.iteration + 1,
+                                }
+                            )
+                        except Exception as le:
+                            print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
+
+                    return accumulated_content
+
+            if is_plan_mode:
+                self.set_mode(name="default")
+
+            if trace:
+                try:
+                    trace.update(
+                        output={
+                            "error": "Max iterations reached",
+                            "iterations": self.iteration,
+                        }
+                    )
+                except Exception as le:
+                    print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
+
+            return "Max iterations reached. Process terminated."
+        finally:
+            if trace:
+                try:
+                    lf_obs.flush()
+                except Exception as le:
+                    print(f"[Langfuse] Failed to flush trace: {le}", file=sys.stderr)

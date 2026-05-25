@@ -1,349 +1,587 @@
-from src.agent import Agent
-from ui.frontend import TerminalDisplay
-from src.utils import process_file_references
+import asyncio
+import argparse
 import sys
 import os
 import json
 import signal
 import threading
 import time
-from src.models.llm import available_models
+import subprocess
+import shutil
+import re
 
+from src.agent import Agent
+from src.coordinator import Coordinator
+from src.commands.registry import CommandRegistry
+from src.utils import discover_skills
+from ui import ReactDisplay
+from ui.theme import COLORS
+from src.utils import process_file_references
+from src.observability import langfuse as lf_obs
+from dotenv import set_key
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to the system clipboard using native tools."""
+    if sys.platform == "darwin":
+        tool = "pbcopy"
+    elif sys.platform == "win32":
+        tool = "clip"
+    elif sys.platform == "linux":
+        if shutil.which("wl-copy"):
+            tool = "wl-copy"
+        elif shutil.which("xclip"):
+            tool = "xclip"
+        elif shutil.which("xsel"):
+            tool = "xsel"
+        else:
+            return False
+    else:
+        return False
+
+    try:
+        proc = subprocess.Popen(
+            [tool],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.communicate(input=text.encode("utf-8"), timeout=5)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _sanitize_terminal_input(text: str) -> str:
+    """Drop terminal control sequences that can arrive from mouse reporting."""
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", text)
+    return "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
 
 
 class TerminusCLI:
-
     def __init__(self, cwd=None):
-
         if cwd:
             os.chdir(cwd)
-        
-        self.agent = Agent(cwd=cwd)
-        self.display = TerminalDisplay()
+
         self.stop_event = threading.Event()
+        self.agent = Agent(cwd=cwd)
+        self.mode = "agent"
+        self.coordinator: Coordinator | None = None
+        self.display = ReactDisplay(stop_event=self.stop_event)
+        self._coordinator_model: str = self.agent.model
         self.sigint_pending_exit = False
         self.last_sigint_time = 0.0
-        self.sigint_grace_window = 1.5  # seconds to treat double Ctrl+C as exit
+        self.sigint_grace_window = 2.0  # seconds to treat double Ctrl+C as exit
+        self._last_response: str | None = None
         self._prev_sigint = signal.getsignal(signal.SIGINT)
+        self._shutting_down = False
+        self._async_loop = asyncio.new_event_loop()
+        self._async_thread = threading.Thread(
+            target=self._run_async_loop,
+            name="terminus-async-loop",
+            daemon=True,
+        )
+        self._async_thread.start()
         signal.signal(signal.SIGINT, self._handle_sigint)
 
-    def _handle_sigint(self, signum, frame):
-        # First Ctrl+C cancels current turn; a second within the grace window exits
-        now = time.monotonic()
-        self.stop_event.set()
-        self.sigint_pending_exit = (now - self.last_sigint_time) <= self.sigint_grace_window
-        self.last_sigint_time = now
-        self.stop_event.set()
-        raise KeyboardInterrupt()
-    
-    def display_available_models(self):
-        self.display.render_table()
+    def _run_async_loop(self):
+        asyncio.set_event_loop(self._async_loop)
+        self._async_loop.run_forever()
 
-    # add at top of file (already imported earlier in your snippet)
-
-    # helper to resolve a model by index or name (case-insensitive)
-    def resolve_model(self, spec: str):
-        """
-        spec: either an integer index (1-based) or a substring/name of model.name/provider.
-        Returns model instance or raises ValueError.
-        """
-        spec = spec.strip()
-        # try index (1-based)
-        if spec.isdigit():
-            idx = int(spec) - 1
-            if 0 <= idx < len(available_models):
-                m = available_models[idx]
-                return m() if isinstance(m, type) else m
-            raise ValueError(f"Model index {spec} out of range (1..{len(available_models)})")
-
-        # try exact name match (case-insensitive)
-        lowered = spec.lower()
-        matches = []
-        for m in available_models:
-            inst = m() if isinstance(m, type) else m
-            if inst.name.lower() == lowered or inst.provider.lower() == lowered:
-                return inst
-            # partial match
-            if lowered in inst.name.lower() or lowered in inst.provider.lower():
-                matches.append(inst)
-
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            names = ", ".join([f"{i+1}:{x.name}" for i,x in enumerate(matches)])
-            raise ValueError(f"Multiple models match '{spec}': {names}")
-
-        raise ValueError(f"No model found matching '{spec}'")
-
-    # update TerminusCLI.switch_model signature (optional but clearer)
-    def switch_model(self, model_spec: str):
-        """
-        model_spec: model name, provider, or 1-based index (string)
-        """
+    def _run_coroutine(self, coro):
+        future = asyncio.run_coroutine_threadsafe(coro, self._async_loop)
         try:
-            model_inst = self.resolve_model(model_spec)
-            # call agent API (assumes agent.switch_model accepts an instance — adjust if it expects a name)
-            self.agent.switch_model(model_inst)
-            self.display.print_message(f"[green]Switched model to[/green] [bold]{model_inst.name}[/bold]")
-        except Exception as e:
-            self.display.print_message(f"[red]Failed to switch model:[/] {e}")
+            return future.result()
+        except KeyboardInterrupt:
+            future.cancel()
+            raise
 
-    
+    def _mark_interrupt(self) -> bool:
+        """Track whether this interrupt should exit the app."""
+        now = time.monotonic()
+        self.sigint_pending_exit = (
+            now - self.last_sigint_time
+        ) <= self.sigint_grace_window
+        self.last_sigint_time = now
+        return self.sigint_pending_exit
+
+    def _handle_sigint(self, signum, frame):
+        if self._shutting_down:
+            return
+        # First Ctrl+C cancels current turn; a second within the grace window exits
+        self.stop_event.set()
+        self._mark_interrupt()
+        raise KeyboardInterrupt()
+
+    def begin_shutdown(self):
+        """Prevent late SIGINTs from interrupting interpreter teardown."""
+        self._shutting_down = True
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if self.coordinator is not None and self._async_loop.is_running():
+            try:
+                self._run_coroutine(self.coordinator.areset())
+            except Exception:
+                pass
+        try:
+            self.agent.tool_registry.shutdown()
+        except Exception:
+            pass
+        if self._async_loop.is_running():
+            self._async_loop.call_soon_threadsafe(self._async_loop.stop)
+            self._async_thread.join(timeout=1.0)
+
+    def _exit_app(self):
+        self.begin_shutdown()
+        self.display.clear_pending_exit()
+        self.display.print_centered(
+            "Shutting down TERMINUS...", style=f"bold {COLORS['text']}"
+        )
+        if hasattr(self.display, "shutdown"):
+            self.display.shutdown()
+        sys.exit(0)
+
+    def _emit_worker_event(self, event_type: str, data: dict):
+        """Forward worker lifecycle events to the display."""
+        method_name = f"send_{event_type}"
+        if hasattr(self.display, method_name):
+            getattr(self.display, method_name)(**data)
+
     def process_query(self, user_input: str):
         """Process user query and coordinate with agent and display"""
         try:
             self.stop_event.clear()
             # Process @ file references
             enriched_message, loaded_files, errors = process_file_references(user_input)
-            
+
             # Display loaded files
             if loaded_files:
-                files_list = ", ".join([f"[cyan]{f}[/cyan]" for f in loaded_files])
-                self.display.print_message(f"[dim bright_yellow]Loaded files: {files_list}")
-            
+                files_list = ", ".join([f"[red]{f}[/red]" for f in loaded_files])
+                self.display.print_message(f"[dim red]Loaded files: {files_list}")
+
             # Display errors if any
             if errors:
                 for error in errors:
-                    self.display.print_message(f"[dim bright_red]Warning: {error}")
-            
-            # Create streaming handler
-            handler = self.display.create_streaming_handler()
-            
+                    self.display.print_message(
+                        f"[dim {COLORS['warning']}]Warning: {error}"
+                    )
+
+            handler = self.display.create_response_handler()
+
             with handler:
-                # Run agent with streaming callbacks (use enriched message)
-                # Pass handler to todo_display_callback via lambda
-                response = self.agent.run(
-                    enriched_message, 
-                    status_callback=handler.update_status,
-                    streaming_callback=handler.handle_streaming,
-                    todo_display_callback=lambda todos: self.display.render_todo_panel(todos, handler=handler),
-                    stop_event=self.stop_event,
-                )
-            
+                if self.mode == "agent":
+                    response = self.agent.run(
+                        enriched_message,
+                        status_callback=handler.update_status,
+                        todo_display_callback=lambda todos: self.display.render_todo_panel(
+                            todos, handler=handler
+                        ),
+                        tool_call_callback=handler.display_tool_call,
+                        tool_output_callback=handler.display_tool_output,
+                        stop_event=self.stop_event,
+                        worker_event_callback=self._emit_worker_event,
+                    )
+                else:
+                    if self.coordinator is None:
+                        self.coordinator = Coordinator(
+                            worker_event_callback=self._emit_worker_event
+                        )
+
+                    response = self._run_coroutine(
+                        self.coordinator.run(
+                            enriched_message,
+                            model=self._coordinator_model,
+                            status_callback=handler.update_status,
+                            tool_call_callback=handler.display_tool_call,
+                            tool_output_callback=handler.display_tool_output,
+                            stop_event=self.stop_event,
+                        )
+                    )
+
             # Render final response after live display stops to keep content visible
             handler.render_final_response(response)
-            
-            # Display request cost if available
-            if self.agent.last_request_cost is not None:
-                cost_str = f"${self.agent.last_request_cost:.6f}"
-                self.display.print_message(f"[dim bright_green]Request cost: {cost_str}[/dim bright_green]")
-            
+            self._last_response = response
+            self.sigint_pending_exit = False
+            self.display.clear_pending_exit()
+
             # Display footer with context info
-            self.display.render_footer(
-                cwd=os.getcwd(),
-                model=self.agent.model,
-                context_size=self.agent.context_size,
-                model_context_size=self.agent.model_context_size
-            )
-            
+            if self.mode == "agent":
+                self.display.render_footer(
+                    cwd=os.getcwd(),
+                    model=self.agent.model,
+                    context_size=self.agent.context_size,
+                    model_context_size=self.agent.model_context_size,
+                )
+            else:
+                self.display.render_footer(
+                    cwd=os.getcwd(),
+                    model=self._coordinator_model,
+                    context_size=0,
+                    model_context_size=0,
+                )
+
         except KeyboardInterrupt:
-            if self.sigint_pending_exit:
+            if self.sigint_pending_exit or self.display.check_pending_exit():
+                self.display.clear_pending_exit()
                 raise
-            self.display.print_message("\n[bold yellow]Turn cancelled. Press Ctrl+C again to exit.[/bold yellow]")
+            self.display.clear_pending_exit()
+            self.sigint_pending_exit = False
             return
         except Exception as e:
             self.display.render_error(str(e))
-    
+
     def execute_command(self, command: str) -> bool:
         """Execute a slash command. Returns True if should continue loop, False if should exit"""
-        
+
         # Exit commands
-        if command.lower() in ['exit', 'quit', '/exit', '/quit', 'q']:
-            self.display.print_centered("Shutting down TERMINUS...", style="bold white")
+        if command.lower() in ["exit", "quit", "/exit", "/quit", "q"]:
+            self.display.print_centered(
+                "Shutting down TERMINUS...", style=f"bold {COLORS['text']}"
+            )
             return False
-        
+
         # Reset session
-        if command.lower() == '/reset':
+        if command.lower() == "/reset":
             self.agent.clear_session()
+            try:
+                self.agent.tool_registry.refresh_mcp_tools()
+            except Exception as e:
+                self.display.render_error(f"MCP refresh failed during reset: {e}")
+            if self.coordinator is not None:
+                self._run_coroutine(self.coordinator.areset())
             self.display.render_success_message("Session reset successfully")
             return True
-        
+
+        # Switch mode
+        if command.lower() == "/mode":
+            new_mode = "coordinator" if self.mode == "agent" else "agent"
+            self.mode = new_mode
+            mode_note = None
+            if new_mode == "coordinator":
+                mode_note = "Context is not shared between agent and coordinator modes."
+            self.display.send_mode_switch(new_mode, note=mode_note)
+            return True
+
         # Clear screen
-        if command.lower() in ['/clear', 'clear']:
+        if command.lower() in ["/clear", "clear"]:
             self.display.clear_screen()
             self.display.render_banner()
             return True
-        
+
         # Display context size
-        if command.lower() == '/context_size':
+        if command.lower() == "/context_size":
             self.display.print_message(f"Context Size: {self.agent.context_size}")
             return True
-        
-        if command.lower() == '/list_models':
-            self.display_available_models()
+
+        # Compact conversation context
+        if command.lower() == "/compact":
+            result = self.agent.context_manager.compact()
+            if result is None:
+                self.display.print_message(
+                    "[dim]Nothing to compact (conversation too short).[/dim]"
+                )
+            else:
+                self.display.render_success_message(
+                    f"Context compacted: {result['before_count']} -> {result['after_count']} messages"
+                )
+                if result["summary"]:
+                    self.display.print_message(f"[dim]Summary: {result['summary'][:200]}...[/dim]")
             return True
 
-          # replace the /switch branch inside execute_command with this:
-        import re
-
-        if command.lower().startswith('/switch'):
-            parts = command.split(maxsplit=1)
-
-            # prefer normalized list if present
-            models = getattr(self, "available_models", available_models)
-
-            # immediate switch if an argument is provided with the command
-            if len(parts) == 2:
-                model_spec = parts[1]
-                self.switch_model(model_spec)
-                return True
-
-            # no arg supplied — show usage and prompt inline
-            self.display.print_message("[yellow]Usage:[/] /switch <model-name-or-index>")
-            for i, m in enumerate(models, start=1):
-                inst = m() if isinstance(m, type) else m
-                self.display.print_message(f"  {i}. {inst.name} ({inst.provider})")
-
-            try:
-                self.display.print_message("[dim]Type the number or name of the model to switch, or press Enter to cancel.[/dim]")
-                # IMPORTANT: call get_user_input() without 'prompt' keyword (your implementation doesn't accept it)
-                selection = self.display.get_user_input().strip()
-
-                # cancel if empty
-                if not selection:
-                    self.display.print_message("[dim]Switch cancelled.[/dim]")
-                    return True
-
-                # sanitize stray symbols but keep model-relevant chars like / : . _ -
-                selection_clean = re.sub(r"[^0-9A-Za-z/_\:\.\-]", "", selection).strip()
-
-                # if number -> index (1-based)
-                if selection_clean.isdigit():
-                    idx = int(selection_clean) - 1
-                    if 0 <= idx < len(models):
-                        m = models[idx]
-                        inst = m() if isinstance(m, type) else m
-                        self.agent.switch_model(inst)
-                        self.display.print_message(f"[green]Switched model to[/green] [bold]{inst.name}[/bold]")
-                        return True
-                    else:
-                        self.display.print_message(f"[red]Index {selection} out of range.[/red]")
-                        return True
-
-                # else try name/provider matches (case-insensitive, partial)
-                sel_lower = selection_clean.lower()
-                matches = []
-                for m in models:
-                    inst = m() if isinstance(m, type) else m
-                    if inst.name.lower() == sel_lower or inst.provider.lower() == sel_lower:
-                        matches = [inst]
-                        break
-                    if sel_lower in inst.name.lower() or sel_lower in inst.provider.lower():
-                        matches.append(inst)
-
-                if len(matches) == 1:
-                    chosen = matches[0]
-                    self.agent.switch_model(chosen)
-                    self.display.print_message(f"[green]Switched model to[/green] [bold]{chosen.name}[/bold]")
-                    return True
-                elif len(matches) > 1:
-                    self.display.print_message("[yellow]Multiple matches found:[/yellow]")
-                    for i, inst in enumerate(matches, start=1):
-                        self.display.print_message(f"  {i}. {inst.name} ({inst.provider})")
-                    self.display.print_message("[dim]Try a more specific name or use the index.[/dim]")
-                    return True
-                else:
-                    self.display.print_message(f"[red]No models matched '{selection}'.[/red]")
-                    return True
-
-            except KeyboardInterrupt:
-                self.display.print_message("\n[bright_red]Switch cancelled by user[/bright_red]")
-                return True
-            except Exception as e:
-                self.display.print_message(f"[red]Error while switching model:[/] {e}")
-                return True
-
-                # Display history
-        if command.lower() == '/history':
+        # Display history
+        if command.lower() == "/history":
             self._display_history()
             return True
-                
-                # Display help
-        if command.lower() == '/help':
+
+            # Display help
+        if command.lower() == "/help":
             self.display.render_help()
             return True
-                
-                # Display context
-        if command.lower() == '/context':
+
+        # Plan mode — passes through to agent
+        if command.lower().startswith("/plan"):
+            if hasattr(self.display, "generation_start"):
+                self.display.generation_start()
+            try:
+                self.process_query(command)
+            finally:
+                if hasattr(self.display, "generation_end"):
+                    self.display.generation_end()
+            self.display.print_newline()
+            return True
+
+        # Copy last response to clipboard
+        if command.lower() == "/copy":
+            if self._last_response:
+                if _copy_to_clipboard(self._last_response):
+                    self.display.render_success_message(
+                        "Copied last response to clipboard"
+                    )
+                else:
+                    self.display.render_error(
+                        "Failed to copy to clipboard (clipboard tool not found)"
+                    )
+            else:
+                self.display.render_error("No response to copy yet")
+            return True
+
+        if command.lower() == "/init":
+            handler = self.display.create_response_handler()
+            with handler:
+                result = self.agent.init(
+                    status_callback=handler.update_status,
+                    todo_display_callback=lambda todos: self.display.render_todo_panel(
+                        todos, handler=handler
+                    ),
+                    tool_call_callback=handler.display_tool_call,
+                    stop_event=self.stop_event,
+                )
+            handler.render_final_response(result)
+            return True
+
+            # Display context
+        if command.lower() == "/context":
             self.display.print_message(str(self.agent.context))
             return True
-        
-        if command.lower() == '/model':
-            self.display.print_message(f"Current Model: {self.agent.model}")
+
+        if command.lower() == "/models":
+            selected = self.display.select_model_ui(current_model=self.agent.model)
+            if selected:
+                self.agent.switch_model(selected)
+                self._coordinator_model = selected.name
+                self.display.print_message(
+                    f"[green]Switched model to[/green] [bold]{selected.name}[/bold]"
+                )
+            else:
+                self.display.print_message("[dim]Model selection cancelled.[/dim]")
             return True
-                
+
+        if command.lower() == "/mcp" or command.lower().startswith("/mcp "):
+            self._handle_mcp_command(command)
+            return True
+
+        # Connect provider and configure API key
+        if command.lower() == "/connect":
+            try:
+                result = self.display.connect_provider_ui()
+                if result is None:
+                    self.display.print_message(
+                        "[dim]Provider connection cancelled.[/dim]"
+                    )
+                    return True
+
+                provider_name, api_key = result
+
+                # Determine the env var name for this provider
+                env_var_map = {
+                    "groq": "GROQ_API_KEY",
+                    "openrouter": "OPEN_ROUTER_API_KEY",
+                }
+                env_var = env_var_map.get(provider_name)
+                if not env_var:
+                    self.display.render_error(f"Unknown provider: {provider_name}")
+                    return True
+
+                # Save to .env file
+                env_path = os.path.join(os.getcwd(), ".env")
+                set_key(env_path, env_var, api_key)
+
+                # Update the provider's API key in-memory
+                self.agent.llm_service.set_provider_api_key(provider_name, api_key)
+
+                self.display.render_success_message(
+                    f"API key configured for {provider_name}. "
+                    f"Use /models to switch to a {provider_name} model."
+                )
+            except KeyboardInterrupt:
+                self.display.print_message("[dim]Provider connection cancelled.[/dim]")
+            except Exception as e:
+                self.display.render_error(str(e))
+            return True
+
+        # List available skills
+        if command.lower() == "/skills":
+            skills = discover_skills(os.getcwd())
+            skills = self.agent.annotate_skills(skills)
+            self.display.render_skills(skills)
+            return True
+
+        # Load a skill by name
+        if command.lower() == "/skill" or command.lower().startswith("/skill "):
+            parts = command.strip().split(maxsplit=1)
+            skills = discover_skills(os.getcwd())
+            skills = self.agent.annotate_skills(skills)
+
+            if not skills:
+                self.display.render_error("No skills found in .skills/ directory.")
+                return True
+
+            if len(parts) < 2:
+                selected = self.display.select_skill_ui(skills)
+                if selected:
+                    self._load_skill(selected)
+                else:
+                    self.display.print_message("[dim]Skill selection cancelled.[/dim]")
+            else:
+                skill_name = parts[1]
+                match = next((s for s in skills if s["name"] == skill_name), None)
+                if match:
+                    self._load_skill(match)
+                else:
+                    self.display.render_error(
+                        f"Skill '{skill_name}' not found. Use /skills to list available skills."
+                    )
+            return True
+
+        # Fallback: React owns command suggestions; unknown commands are explicit errors.
+        if command.startswith("/"):
+            self.display.render_error(f"Unknown command: {command}")
+            return True
+
         return True
-    
+
+    def _handle_mcp_command(self, command: str):
+        parts = command.strip().split()
+        subcommand = parts[1].lower() if len(parts) > 1 else "status"
+
+        if subcommand in {"status", ""}:
+            self._render_mcp_status(self.agent.tool_registry.mcp_status())
+            return
+
+        if subcommand == "refresh":
+            status = self.agent.tool_registry.refresh_mcp_tools()
+            self.display.render_success_message("MCP tools refreshed")
+            self._render_mcp_status(status)
+            return
+
+        if subcommand == "tools":
+            tools_by_server = self.agent.tool_registry.mcp_tools_by_server()
+            if not tools_by_server:
+                self.display.print_message("[dim]No MCP tools discovered.[/dim]")
+                return
+            lines = []
+            for server_id, tools in sorted(tools_by_server.items()):
+                lines.append(f"[bold]{server_id}[/bold]")
+                for tool_name in sorted(tools):
+                    lines.append(f"  - {tool_name}")
+            self.display.print_message("\n".join(lines))
+            return
+
+        self.display.render_error(f"Unknown MCP command: {command}")
+
+    def _render_mcp_status(self, status: dict):
+        servers = status.get("servers", {})
+        if not servers:
+            self.display.print_message(
+                f"[dim]No MCP servers configured. Expected {status.get('config_path')}[/dim]"
+            )
+        else:
+            lines = [f"MCP config: {status.get('config_path')}"]
+            for server_id, server in sorted(servers.items()):
+                tool_count = server.get("tool_count", 0)
+                state = server.get("status", "unknown")
+                line = f"- {server_id}: {state}, {tool_count} tool{'s' if tool_count != 1 else ''}"
+                if server.get("error"):
+                    line += f" ({server['error']})"
+                lines.append(line)
+            self.display.print_message("\n".join(lines))
+
+        for warning in status.get("warnings", []):
+            self.display.print_message(f"[yellow]Warning: {warning}[/yellow]")
+
     def _display_history(self):
         """Display session history"""
         history = self.agent.get_session_history(limit=5)
-        
+
         if not history:
             self.display.print_message("[yellow]No session history available.[/yellow]")
             return
-        
+
         history_lines = []
         for idx, msg in enumerate(history, 1):
             try:
-                # Parse JSON content
-                msg_data = json.loads(msg['content'])
-                role = msg_data.get('role', 'unknown')
-                content = msg_data.get('content', '')
-                
-                # Truncate long messages
+                msg_data = json.loads(msg["content"])
+                role = msg_data.get("role", "unknown")
+                content = msg_data.get("content", "")
+
                 if len(content) > 150:
                     display_content = content[:150] + "..."
                 else:
                     display_content = content
-                
-                # Format with colors
+
                 color = self.display.get_role_color(role)
                 line = f"{idx}. [bold {color}]{role.upper()}:[/] {display_content}"
                 history_lines.append(line)
-                
+
             except json.JSONDecodeError:
-                # Fallback for non-JSON messages
-                role = msg['role']
-                content = msg['content'][:150]
+                role = msg["role"]
+                content = msg["content"][:150]
                 color = self.display.get_role_color(role)
                 line = f"{idx}. [bold {color}]{role.upper()}:[/] {content}"
                 history_lines.append(line)
-        
+
         self.display.render_history(history_lines)
-    
+
+    def _load_skill(self, skill: dict):
+        """Load a skill's content into the current conversation context."""
+        skill_name = skill.get("name", "unknown")
+        loaded = self.agent.load_skill(skill)
+        if not loaded:
+            self.display.render_success_message(f"Skill '{skill_name}' is already loaded")
+            return
+        self.display.render_success_message(f"Skill '{skill_name}' loaded into context")
+
     def run_interactive(self):
         """Run interactive mode with conversation loop"""
         self.display.render_banner()
         while True:
             try:
                 self.stop_event.clear()
-                user_input = self.display.get_user_input()
-                
+
+                user_input = self.display.get_user_input(
+                    model=self.agent.model,
+                    context_size=self.agent.context_size,
+                    model_context_size=self.agent.model_context_size,
+                )
+
+                user_input = _sanitize_terminal_input(user_input)
+
                 # Handle empty input
                 if not user_input.strip():
                     continue
-                
-                # Check if it's a command (but not /plan which should be processed as a query)
-                if (user_input.startswith('/') and not user_input.startswith('/plan')) or user_input.lower() in ['exit', 'quit', 'q', 'clear']:
+
+                if hasattr(self.display, "render_user_message"):
+                    self.display.render_user_message(user_input)
+
+                # Check if it's a registered slash command or exit alias
+                is_known_command = CommandRegistry.is_registered(
+                    user_input.lower().split()[0]
+                ) or user_input.lower().split()[0] in ["exit", "quit", "q", "clear"]
+                if is_known_command:
                     should_continue = self.execute_command(user_input)
                     if not should_continue:
                         break
                     continue
-                
+
                 # Process as query
-                self.process_query(user_input)
+                if hasattr(self.display, "generation_start"):
+                    self.display.generation_start()
+                try:
+                    self.process_query(user_input)
+                finally:
+                    if hasattr(self.display, "generation_end"):
+                        self.display.generation_end()
                 self.display.print_newline()
-            
+
             except KeyboardInterrupt:
-                if self.sigint_pending_exit:
-                    self.display.print_message("\n[bright_red]Exiting TERMINUS...[/bright_red]")
-                    sys.exit(0)
+                if self.sigint_pending_exit or self.display.check_pending_exit():
+                    self._exit_app()
                 # Single interrupt: cancel turn, keep session
-                self.display.print_message("\n[bold yellow]Turn cancelled. Press Ctrl+C again to exit.[/bold yellow]")
                 self.stop_event.clear()
+                self.display.clear_pending_exit()
                 self.sigint_pending_exit = False
                 continue
-    
+
     def run_single_query(self, query: str):
         """Run a single query (useful for non-interactive mode)"""
         self.display.render_banner()
@@ -352,16 +590,37 @@ class TerminusCLI:
 
 def main():
     """Main entry point for 'terminus' command"""
+    parser = argparse.ArgumentParser(
+        prog="terminus",
+        description="AI-powered development companion for the command line",
+    )
+    parser.add_argument(
+        "query", nargs="*", help="Single query to run (non-interactive)"
+    )
+    args = parser.parse_args()
+
     # Always use the current working directory where the command is invoked
     invoked_dir = os.getcwd()
     cli = TerminusCLI(cwd=invoked_dir)
-    
-    # Check if a query was passed as command line argument
-    if len(sys.argv) > 1:
-        query = " ".join(sys.argv[1:])
-        cli.run_single_query(query)
-    else:
-        cli.run_interactive()
+
+    # Verify Langfuse connectivity early so the user knows if traces will be lost.
+    if lf_obs.is_enabled():
+        ok, msg = lf_obs.test_connection()
+        if not ok:
+            cli.display.print_message(f"[yellow]Langfuse warning:[/yellow] {msg}")
+
+    try:
+        if args.query:
+            cli.run_single_query(" ".join(args.query))
+        else:
+            cli.run_interactive()
+    finally:
+        cli.begin_shutdown()
+        # Ensure any queued Langfuse events are flushed before exit.
+        lf_obs.flush()
+        # Graceful shutdown for React UI
+        if hasattr(cli.display, "shutdown"):
+            cli.display.shutdown()
 
 
 if __name__ == "__main__":
