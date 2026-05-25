@@ -96,8 +96,8 @@ const afterWorkerStatusUpdate = reducer(afterWorkerStatus, {
 });
 assert.equal(afterWorkerStatusUpdate.workers[0]?.status, "completed");
 assert.equal(
-  selectTranscriptItems(afterWorkerStatusUpdate).find((item) => item.id === "worker-status-worker-1")?.body,
-  "done",
+  selectTranscriptItems(afterWorkerStatusUpdate).some((item) => item.id === "worker-status-worker-1"),
+  false,
 );
 assert.deepEqual(
   selectWorkers(afterWorkerStatusUpdate).map((worker) => ({
@@ -108,7 +108,18 @@ assert.deepEqual(
   [{ id: "worker-1", title: "Explorer", status: "completed" }],
 );
 
-const afterWorkerThinking = reducer(afterWorkerStatusUpdate, {
+const afterWorkerNotification = reducer(afterWorkerStatusUpdate, {
+  type: "bridge",
+  message: {
+    type: "worker_notification",
+    id: "worker-note-worker-1",
+    workerId: "worker-1",
+    status: "running",
+    summary: "checking files",
+  },
+});
+
+const afterWorkerThinking = reducer(afterWorkerNotification, {
   type: "bridge",
   message: {
     type: "worker_detail",
@@ -144,7 +155,11 @@ const afterWorkerToolOutput = reducer(afterWorkerToolCall, {
 
 assert.deepEqual(
   selectWorkerActivity(afterWorkerToolOutput, "worker-1").map((activity) => activity.content),
-  ["done", "first thought", "reading files", "file contents"],
+  ["half", "done", "checking files", "first thought", "reading files", "file contents"],
+);
+assert.deepEqual(
+  selectWorkerActivity(afterWorkerToolOutput, "worker-1").map((activity) => activity.title),
+  ["worker-1 running", "worker-1 completed", "worker-1 running", "", "read_file", "read_file"],
 );
 assert.deepEqual(afterWorkerToolOutput.workers[0]?.activityCounts, {
   thinking: 1,
@@ -181,3 +196,66 @@ const afterClear = reducer(afterManyWorkerDetails, {
 assert.deepEqual(selectTranscriptItems(afterClear), []);
 assert.deepEqual(selectStreamingItems(afterClear), []);
 assert.deepEqual(afterClear.workers, []);
+assert.deepEqual(afterClear.todos, []);
+
+const afterTodoList = reducer(initialState, {
+  type: "bridge",
+  message: {
+    type: "todo_list",
+    items: [
+      { task: "Build search command", status: "in_progress" },
+      { task: "Wire into registry", status: "pending" },
+      { task: "Update React UI", status: "completed" },
+    ],
+  },
+});
+assert.equal(afterTodoList.todos.length, 3);
+assert.equal(afterTodoList.todos[0]?.status, "in_progress");
+assert.equal(afterTodoList.todos[2]?.status, "completed");
+
+const afterTodoUpdate = reducer(afterTodoList, {
+  type: "bridge",
+  message: {
+    type: "todo_list",
+    items: [
+      { task: "Build search command", status: "completed" },
+      { task: "Wire into registry", status: "in_progress" },
+      { task: "Update React UI", status: "completed" },
+    ],
+  },
+});
+assert.equal(afterTodoUpdate.todos[0]?.status, "completed");
+assert.equal(afterTodoUpdate.todos[1]?.status, "in_progress");
+
+const afterQuestionRequest = reducer(initialState, {
+  type: "bridge",
+  message: {
+    type: "question_request",
+    questions: [
+      {
+        text: "Which files should I update?",
+        options: ["Backend only", "Frontend only", "Both"],
+        allowMultiple: false,
+      },
+      {
+        text: "Which checks should I run?",
+        options: ["Python tests", "React tests", "Typecheck"],
+        allowMultiple: true,
+      },
+      {
+        text: "How should I verify the UI?",
+        options: ["Manual only", "Tests only", "Both"],
+        allowMultiple: false,
+      },
+    ],
+  },
+});
+assert.equal(afterQuestionRequest.inputActive, false);
+assert.equal(afterQuestionRequest.questionSession?.questions.length, 3);
+assert.equal(afterQuestionRequest.questionSession?.questions[1]?.allowMultiple, true);
+
+const afterQuestionClosed = reducer(afterQuestionRequest, {
+  type: "selection_closed",
+  selection: "question",
+});
+assert.equal(afterQuestionClosed.questionSession, null);

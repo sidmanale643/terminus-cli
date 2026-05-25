@@ -1,8 +1,10 @@
-import React, { useEffect, useReducer, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useReducer, useRef, useState } from "react";
+import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { SocketClient } from "./socket-client.js";
 import type {
   CommandOption,
+  GuidedQuestion,
   InboundEnvelope,
   ModelOption,
   OutboundMessage,
@@ -19,24 +21,72 @@ import {
   type WorkerState,
   type StreamingItem,
   type TranscriptItem,
+  type TodoItem,
 } from "./state.js";
-import { calculateTranscriptHeight } from "./layout.js";
+import {
+  calculateBottomWorkerPaneHeight,
+  calculateMainContentRows,
+  calculateSideBySideHeight,
+  calculateSideWorkerPaneHeight,
+  calculateTranscriptFrameHeight,
+  calculateWorkerPaneLayout,
+  TRANSCRIPT_CHROME_ROWS,
+  type WorkerPaneLayout,
+} from "./layout.js";
+import {
+  enableSgrMouseReporting,
+  findTranscriptMouseHit,
+  isSgrMouseInput,
+  parseSgrMouseClick,
+  parseSgrMouseWheels,
+  type TranscriptHitArea,
+} from "./mouse.js";
+import {
+  applyScrollAction,
+  createViewportWindow,
+  keepScrollPositionAfterRowChange,
+  nextSmoothScrollOffset,
+  visibleOptionRange,
+  wrapTextToRows,
+  type RenderedTranscriptLine,
+  type ScrollAction,
+} from "./viewport.js";
+import {
+  buildWorkerPaneRows,
+  type WorkerPaneRow,
+  type WorkerResultLine,
+} from "./worker-view.js";
 
 const COLORS = {
-  background: "#0f1115",
-  panel: "#1a1e24",
-  border: "#4c566a",
-  text: "#e5dccf",
-  dim: "#8a8f98",
-  accent: "#d9a441",
-  accentSoft: "#7c5e22",
-  danger: "#d26a5c",
-  success: "#86b36b",
-  info: "#77a7d9",
+  background: "#0d1117",
+  panel: "#161b22",
+  panelMuted: "#1c2128",
+  border: "#30363d",
+  borderMuted: "#21262d",
+  text: "#f0f6fc",
+  dim: "#8b949e",
+  muted: "#6e7681",
+  accent: "#58a6ff",
+  accentSoft: "#1f6feb",
+  danger: "#ff7b72",
+  success: "#7ee787",
+  info: "#79c0ff",
 };
 
+const WIDE_BANNER_MIN_WIDTH = 78;
+const WIDE_BANNER_ROWS = 8;
+const COMPACT_BANNER_ROWS = 4;
+const WELCOME_ROWS = 6;
 const COMPACT_LABEL_LENGTH = 18;
 const COMPACT_BODY_LENGTH = 52;
+const TRANSCRIPT_CONTENT_COLUMN = 3;
+const TRANSCRIPT_FIRST_CONTENT_ROW = 2;
+const TRANSCRIPT_CHROME_COLUMNS = 4;
+const TRANSCRIPT_WHEEL_ROWS = 2;
+const TRANSCRIPT_SMOOTH_SCROLL_FRAME_MS = 12;
+const MAX_SIDE_WORKER_PANE_ROWS = 14;
+const MODAL_OPTION_ROWS = 10;
+const REVIEW_SUBMIT_INDEX_OFFSET = 1;
 
 function homeCompressed(pathValue: string): string {
   const home = process.env.HOME ?? "";
@@ -51,6 +101,15 @@ function truncateMiddle(value: string, maxLength: number): string {
   return `${value.slice(0, keep)}~${value.slice(value.length - tail)}`;
 }
 
+function shouldUseWideBanner(width: number): boolean {
+  return width >= WIDE_BANNER_MIN_WIDTH;
+}
+
+export function calculateBannerRows(width: number, hasBanner: boolean): number {
+  if (!hasBanner) return 0;
+  return shouldUseWideBanner(width) ? WIDE_BANNER_ROWS : COMPACT_BANNER_ROWS;
+}
+
 function formatPercent(value: number): string {
   const normalized = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
   return `${normalized}%`;
@@ -62,19 +121,23 @@ type InlineToken =
   | { type: "code"; value: string }
   | { type: "link"; label: string; url: string };
 
+interface MarkdownTable {
+  header: string[];
+  rows: string[][];
+  endIndex: number;
+}
+
 function compactLine(value: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
   const singleLine = value.replace(/\s+/g, " ").trim();
   if (singleLine.length <= maxLength) return singleLine;
   return `${singleLine.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function formatWorkerTimestamp(timestamp?: number): string {
-  if (!timestamp) return "";
-  return new Date(timestamp * 1000).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+function truncatePreservingWhitespace(value: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
+  if (value.length <= maxLength) return value;
+  return value.slice(0, maxLength);
 }
 
 function parseInlineMarkdown(value: string): InlineToken[] {
@@ -142,60 +205,90 @@ function MarkdownInline({ text, color }: { text: string; color: string }) {
   );
 }
 
-function MarkdownBlock({
-  text,
-  color,
-}: {
-  text: string;
-  color: string;
-}) {
-  const lines = text.split("\n");
+export function markdownDisplayRows(markdown: string, width: number): string[] {
+  const rows: string[] = [];
+  const sourceRows = markdown.split("\n");
+  const displayWidth = Math.max(1, width);
+  for (let index = 0; index < sourceRows.length; index += 1) {
+    const table = readMarkdownTable(sourceRows, index);
+    if (table) {
+      rows.push(...formatMarkdownTable(table, displayWidth));
+      index = table.endIndex;
+      continue;
+    }
+    rows.push(formatMarkdownBlockRow(sourceRows[index]));
+  }
+  return rows;
+}
 
-  return (
-    <Box flexDirection="column">
-      {lines.map((line, index) => {
-        const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
-        const bulletMatch = line.match(/^(\s*)[-*]\s+(.*)$/);
-        const orderedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+function formatMarkdownBlockRow(row: string): string {
+  const heading = row.match(/^(#{1,6})\s+(.*)$/);
+  if (heading) return heading[2] ?? "";
+  return row;
+}
 
-        if (headingMatch) {
-          return (
-            <Text key={`line-${index}`} color={COLORS.accent} bold>
-              {headingMatch[2]}
-            </Text>
-          );
-        }
+function readMarkdownTable(rows: string[], startIndex: number): MarkdownTable | null {
+  if (!isMarkdownTableRow(rows[startIndex]) || !isMarkdownTableSeparator(rows[startIndex + 1])) {
+    return null;
+  }
 
-        if (bulletMatch) {
-          return (
-            <Box key={`line-${index}`}>
-              <Text color={COLORS.dim}>• </Text>
-              <MarkdownInline text={bulletMatch[2]} color={color} />
-            </Box>
-          );
-        }
+  const header = parseMarkdownTableRow(rows[startIndex]);
+  const bodyRows: string[][] = [];
+  let endIndex = startIndex + 1;
 
-        if (orderedMatch) {
-          return (
-            <Box key={`line-${index}`}>
-              <Text color={COLORS.dim}>{`${orderedMatch[2]}. `}</Text>
-              <MarkdownInline text={orderedMatch[3]} color={color} />
-            </Box>
-          );
-        }
+  for (let index = startIndex + 2; index < rows.length; index += 1) {
+    if (!isMarkdownTableRow(rows[index])) break;
+    bodyRows.push(parseMarkdownTableRow(rows[index]));
+    endIndex = index;
+  }
 
-        if (line.trim() === "") {
-          return <Text key={`line-${index}`}> </Text>;
-        }
+  return { header, rows: bodyRows, endIndex };
+}
 
-        return (
-          <Text key={`line-${index}`} color={color}>
-            <MarkdownInline text={line} color={color} />
-          </Text>
-        );
-      })}
-    </Box>
-  );
+function isMarkdownTableRow(row: string | undefined): boolean {
+  return Boolean(row?.trim()) && (row?.includes("|") ?? false);
+}
+
+function isMarkdownTableSeparator(row: string | undefined): boolean {
+  if (!row) return false;
+  const cells = parseMarkdownTableRow(row);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function parseMarkdownTableRow(row: string): string[] {
+  const trimmed = row.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function formatMarkdownTable(table: MarkdownTable, width: number): string[] {
+  const columnCount = Math.max(table.header.length, ...table.rows.map((row) => row.length));
+  const columnWidths = markdownTableColumnWidths(table, columnCount, width);
+  return [
+    formatMarkdownTableRow(table.header, columnWidths),
+    formatMarkdownTableSeparator(columnWidths),
+    ...table.rows.map((row) => formatMarkdownTableRow(row, columnWidths)),
+  ];
+}
+
+function markdownTableColumnWidths(table: MarkdownTable, columnCount: number, width: number): number[] {
+  const naturalWidths = Array.from({ length: columnCount }, (_, columnIndex) => (
+    Math.max(3, ...[table.header, ...table.rows].map((row) => (row[columnIndex] ?? "").length))
+  ));
+  const naturalTableWidth = naturalWidths.reduce((total, cellWidth) => total + cellWidth, 0) + columnCount * 3 + 1;
+  if (naturalTableWidth <= width) return naturalWidths;
+
+  const availableCellWidth = Math.max(columnCount * 3, width - columnCount * 3 - 1);
+  const maxColumnWidth = Math.max(3, Math.floor(availableCellWidth / columnCount));
+  return naturalWidths.map((cellWidth) => Math.min(cellWidth, maxColumnWidth));
+}
+
+function formatMarkdownTableRow(cells: string[], columnWidths: number[]): string {
+  const paddedCells = columnWidths.map((width, index) => ` ${compactLine(cells[index] ?? "", width).padEnd(width)} `);
+  return `|${paddedCells.join("|")}|`;
+}
+
+function formatMarkdownTableSeparator(columnWidths: number[]): string {
+  return `|${columnWidths.map((width) => ` ${"-".repeat(width)} `).join("|")}|`;
 }
 
 function roleColor(item: TranscriptItem): string {
@@ -307,29 +400,16 @@ function transcriptPreview(item: TranscriptItem, expanded: boolean): string {
   return expanded ? item.body : compactLine(item.preview || item.body, COMPACT_BODY_LENGTH);
 }
 
-function estimateRows(item: TranscriptItem): number {
-  if (item.collapsible || isCompactTranscriptItem(item)) {
-    return 1;
-  }
-
-  return Math.min(8, Math.max(1, item.body.split("\n").length + 1));
-}
-
-function visibleTranscriptItems(items: TranscriptItem[], maxRows: number): TranscriptItem[] {
-  const visible: TranscriptItem[] = [];
-  let usedRows = 0;
-
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    const rows = estimateRows(item);
-    if (visible.length > 0 && usedRows + rows > maxRows) {
-      break;
-    }
-    visible.unshift(item);
-    usedRows += rows;
-  }
-
-  return visible;
+function isMouseWithinBounds(
+  point: { x: number; y: number },
+  bounds: { top: number; left: number; width: number; height: number },
+): boolean {
+  return (
+    point.x >= bounds.left &&
+    point.x < bounds.left + bounds.width &&
+    point.y >= bounds.top &&
+    point.y < bounds.top + bounds.height
+  );
 }
 
 function Spinner({
@@ -396,7 +476,6 @@ function InputPanel({
   commands,
   connectionError,
   isGenerating,
-  focusedPane,
   cwd,
   model,
   contextPercent,
@@ -409,7 +488,6 @@ function InputPanel({
   commands: CommandOption[];
   connectionError: string | null;
   isGenerating: boolean;
-  focusedPane: "input" | "transcript" | "workers";
   cwd: string;
   model: string;
   contextPercent: number;
@@ -441,6 +519,7 @@ function InputPanel({
   }, [active]);
 
   useInput((input, key) => {
+    if (isSgrMouseInput(input)) return;
     if (!active) return;
 
     if (key.ctrl && input === "c") {
@@ -520,11 +599,7 @@ function InputPanel({
       </Box>
       {active ? (
         <Text color={COLORS.dim}>
-          {focusedPane === "transcript"
-            ? "Tab focus input  Up/Down select transcript item  Enter/Space toggle item"
-            : focusedPane === "workers"
-              ? "Tab focus input  Up/Down select worker  Enter open details  Esc close details"
-            : "Enter submit  Tab focus transcript  Ctrl+C interrupt"}
+          Enter submit  Ctrl+C interrupt
         </Text>
       ) : (
         <Text color={COLORS.dim}>Ready</Text>
@@ -533,177 +608,361 @@ function InputPanel({
   );
 }
 
-function Transcript({
-  items,
-  streams,
-  height,
-  interactive,
-}: {
+interface TranscriptLinePayload {
+  color: string;
+  dim?: boolean;
+  hitId?: string;
+}
+
+type TranscriptDisplayLine = RenderedTranscriptLine<TranscriptLinePayload>;
+
+function buildTranscriptLines(options: {
   items: TranscriptItem[];
   streams: StreamingItem[];
-  height: number;
-  interactive: boolean;
-}) {
-  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const visibleItems = visibleTranscriptItems(items, Math.max(1, height - streams.length - 2));
+  expandedIds: Record<string, boolean>;
+  width: number;
+}): TranscriptDisplayLine[] {
+  const lines: TranscriptDisplayLine[] = [];
+  const contentWidth = Math.max(1, options.width);
+
+  options.items.forEach((item, index) => {
+    appendTranscriptGap(lines, item, options.items[index - 1]);
+    appendTranscriptItemLines(lines, item, Boolean(options.expandedIds[item.id]), contentWidth);
+  });
+
+  options.streams.forEach((stream) => {
+    appendWrappedTranscriptLine(lines, {
+      sourceId: stream.id,
+      text: "Assistant",
+      width: contentWidth,
+      payload: { color: COLORS.text },
+    });
+    appendBodyRows(lines, stream.id, stream.content, contentWidth, COLORS.text, false);
+  });
+
+  return lines;
+}
+
+function appendTranscriptGap(
+  lines: TranscriptDisplayLine[],
+  item: TranscriptItem,
+  previousItem: TranscriptItem | undefined,
+): void {
+  const gap = transcriptGap(previousItem, item);
+  for (let index = 0; index < gap; index += 1) {
+    lines.push({
+      id: `${item.id}-gap-${index}`,
+      sourceId: item.id,
+      text: "",
+      payload: { color: COLORS.text },
+    });
+  }
+}
+
+function appendTranscriptItemLines(
+  lines: TranscriptDisplayLine[],
+  item: TranscriptItem,
+  expanded: boolean,
+  width: number,
+): void {
+  const meta = transcriptMeta(item);
+  const isInternal = transcriptGroup(item) === "internal";
+  const hitId = item.collapsible ? item.id : undefined;
+
+  if (item.collapsible && !expanded) {
+    appendWrappedTranscriptLine(lines, {
+      sourceId: item.id,
+      text: collapsedTranscriptText(item, meta.label),
+      width,
+      payload: { color: meta.bodyColor, dim: isInternal, hitId },
+    });
+    return;
+  }
+
+  appendExpandedTranscriptLines(lines, item, expanded, width, meta, isInternal, hitId);
+}
+
+function collapsedTranscriptText(item: TranscriptItem, label: string): string {
+  const preview = transcriptPreview(item, false);
+  const prefix = label ? `${compactLine(label, COMPACT_LABEL_LENGTH)}: ` : "";
+  return `${prefix}${preview} show more`;
+}
+
+function appendExpandedTranscriptLines(
+  lines: TranscriptDisplayLine[],
+  item: TranscriptItem,
+  expanded: boolean,
+  width: number,
+  meta: ReturnType<typeof transcriptMeta>,
+  isInternal: boolean,
+  hitId?: string,
+): void {
+  const compactItem = isCompactTranscriptItem(item);
+  const body = transcriptBodyForDisplay(item, expanded);
+  const label = compactLine(meta.label, COMPACT_LABEL_LENGTH);
+  const bodyPrefix = item.kind === "tool_output" ? `${toolOutputName(item.title)} ` : "";
+
+  if (compactItem && body.trim() && !body.includes("\n")) {
+    appendWrappedTranscriptLine(lines, {
+      sourceId: item.id,
+      text: `${expanded ? "[-] " : ""}${label}: ${bodyPrefix}${compactLine(body, COMPACT_BODY_LENGTH)}`,
+      width,
+      payload: { color: meta.bodyColor, dim: isInternal, hitId },
+    });
+    return;
+  }
+
+  appendWrappedTranscriptLine(lines, {
+    sourceId: item.id,
+    text: `${expanded ? "[-] " : ""}${label}${item.collapsible ? " collapse" : ""}`,
+    width,
+    payload: { color: meta.labelColor, dim: isInternal, hitId },
+  });
+
+  if (bodyPrefix) {
+    appendWrappedTranscriptLine(lines, {
+      sourceId: item.id,
+      text: `  ${bodyPrefix}`,
+      width,
+      payload: { color: meta.bodyColor, dim: compactItem },
+    });
+  }
+
+  appendBodyRows(lines, item.id, body, width, meta.bodyColor, compactItem);
+}
+
+function transcriptBodyForDisplay(item: TranscriptItem, expanded: boolean): string {
+  if (!item.collapsible) return item.body;
+  return expanded ? item.body : transcriptPreview(item, false);
+}
+
+function appendBodyRows(
+  lines: TranscriptDisplayLine[],
+  sourceId: string,
+  body: string,
+  width: number,
+  color: string,
+  dim: boolean,
+): void {
+  if (!body.trim()) return;
+
+  markdownDisplayRows(body, width - 2).forEach((line) => {
+    appendWrappedTranscriptLine(lines, {
+      sourceId,
+      text: `  ${line}`,
+      width,
+      payload: { color, dim },
+    });
+  });
+}
+
+function appendWrappedTranscriptLine(
+  lines: TranscriptDisplayLine[],
+  options: {
+    sourceId: string;
+    text: string;
+    width: number;
+    payload: TranscriptLinePayload;
+  },
+): void {
+  wrapTextToRows(options.text, options.width).forEach((row, index) => {
+    lines.push({
+      id: `${options.sourceId}-${lines.length}-${index}`,
+      sourceId: options.sourceId,
+      text: row,
+      payload: index === 0 ? options.payload : { ...options.payload, hitId: undefined },
+    });
+  });
+}
+
+function buildTranscriptHitAreas(
+  visibleLines: TranscriptDisplayLine[],
+): TranscriptHitArea[] {
+  return visibleLines
+    .map((line, index) => {
+      if (!line.payload.hitId) return null;
+      return {
+        id: line.payload.hitId,
+        row: TRANSCRIPT_FIRST_CONTENT_ROW + index,
+        startColumn: TRANSCRIPT_CONTENT_COLUMN,
+        endColumn: Number.MAX_SAFE_INTEGER,
+      };
+    })
+    .filter((area): area is TranscriptHitArea => Boolean(area));
+}
+
+function scrollActionFromKey(key: {
+  pageUp: boolean;
+  pageDown: boolean;
+  upArrow: boolean;
+  downArrow: boolean;
+  shift: boolean;
+  meta: boolean;
+}): ScrollAction | null {
+  if (key.pageUp) return { type: "page_up" };
+  if (key.pageDown) return { type: "page_down" };
+  if (key.meta && key.upArrow) return { type: "home" };
+  if (key.meta && key.downArrow) return { type: "end" };
+  if (key.shift && key.upArrow) return { type: "line_up" };
+  if (key.shift && key.downArrow) return { type: "line_down" };
+  return null;
+}
+
+function useSmoothScrollOffset(totalRows: number, viewportRows: number) {
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const targetOffset = useRef(0);
+  const previousTotalRows = useRef(0);
+  const totalRowsRef = useRef(totalRows);
+  const viewportRowsRef = useRef(viewportRows);
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  totalRowsRef.current = totalRows;
+  viewportRowsRef.current = viewportRows;
+
+  const stopScrollTimer = () => {
+    if (!timer.current) return;
+    clearInterval(timer.current);
+    timer.current = null;
+  };
+
+  const animateTowardTarget = () => {
+    if (timer.current) return;
+    timer.current = setInterval(() => {
+      setScrollOffset((current) => {
+        const next = nextSmoothScrollOffset({
+          currentOffset: current,
+          targetOffset: targetOffset.current,
+          totalRows: totalRowsRef.current,
+          viewportRows: viewportRowsRef.current,
+        });
+        if (next === targetOffset.current) stopScrollTimer();
+        return next;
+      });
+    }, TRANSCRIPT_SMOOTH_SCROLL_FRAME_MS);
+  };
+
+  const moveByAction = (action: ScrollAction) => {
+    targetOffset.current = applyScrollAction(
+      targetOffset.current,
+      action,
+      totalRowsRef.current,
+      viewportRowsRef.current,
+    );
+    animateTowardTarget();
+  };
 
   useEffect(() => {
-    if (visibleItems.length === 0) {
-      setSelectedIndex(0);
-      return;
-    }
-    setSelectedIndex((current) => Math.min(current, visibleItems.length - 1));
-  }, [visibleItems.length]);
+    setScrollOffset((current) => {
+      const nextCurrent = keepScrollPositionAfterRowChange({
+        previousOffset: current,
+        previousTotalRows: previousTotalRows.current,
+        nextTotalRows: totalRows,
+        viewportRows,
+      });
+      targetOffset.current = keepScrollPositionAfterRowChange({
+        previousOffset: targetOffset.current,
+        previousTotalRows: previousTotalRows.current,
+        nextTotalRows: totalRows,
+        viewportRows,
+      });
+      previousTotalRows.current = totalRows;
+      return nextCurrent;
+    });
+  }, [totalRows, viewportRows]);
+
+  useEffect(() => () => stopScrollTimer(), []);
+
+  return { scrollOffset, moveByAction };
+}
+
+function Transcript({
+  lines,
+  setExpandedIds,
+  height,
+  mouseActive,
+  top,
+  left,
+  width,
+}: {
+  lines: TranscriptDisplayLine[];
+  setExpandedIds: Dispatch<SetStateAction<Record<string, boolean>>>;
+  height: number;
+  mouseActive: boolean;
+  top: number;
+  left: number;
+  width: number;
+}) {
+  const contentRows = Math.max(1, height - TRANSCRIPT_CHROME_ROWS);
+  const { scrollOffset, moveByAction } = useSmoothScrollOffset(lines.length, contentRows);
+  const viewport = createViewportWindow(lines, contentRows, scrollOffset);
+  const visibleLines = viewport.lines;
+  const hitAreas = buildTranscriptHitAreas(visibleLines);
 
   useInput((input, key) => {
-    if (!interactive || visibleItems.length === 0) return;
-    if (key.upArrow) {
-      setSelectedIndex((current) => Math.max(0, current - 1));
+    if (!isSgrMouseInput(input)) {
+      const action = scrollActionFromKey(key);
+      if (!action) return;
+      moveByAction(action);
       return;
     }
-    if (key.downArrow) {
-      setSelectedIndex((current) => Math.min(visibleItems.length - 1, current + 1));
+
+    if (isSgrMouseInput(input)) {
+      if (!mouseActive) return;
+      const wheels = parseSgrMouseWheels(input)
+        .filter((wheel) => isMouseWithinBounds(wheel, { top, left, width, height }));
+      if (wheels.length > 0) {
+        wheels.forEach((wheel) => {
+          moveByAction({
+            type: wheel.direction === "up" ? "line_up" : "line_down",
+            rows: TRANSCRIPT_WHEEL_ROWS,
+          });
+        });
+        return;
+      }
+
+      const click = parseSgrMouseClick(input);
+      if (!click) return;
+      if (!isMouseWithinBounds(click, { top, left, width, height })) return;
+
+      const itemId = findTranscriptMouseHit({
+        click,
+        transcriptTop: top,
+        transcriptLeft: left,
+        hitAreas,
+      });
+      if (!itemId) return;
+
+      setExpandedIds((current) => ({ ...current, [itemId]: !current[itemId] }));
       return;
-    }
-    if (key.return || input === " ") {
-      const selected = visibleItems[selectedIndex];
-      if (!selected?.collapsible) return;
-      setExpandedIds((current) => ({ ...current, [selected.id]: !current[selected.id] }));
     }
   });
 
   return (
     <Box
       flexDirection="column"
+      width={width}
       height={height}
       borderStyle="round"
       borderColor={COLORS.border}
       paddingX={1}
     >
-      {visibleItems.map((item, index) => (
-        <TranscriptRow
-          key={item.id}
-          item={item}
-          expanded={Boolean(expandedIds[item.id])}
-          selected={interactive && index === selectedIndex}
-          marginTop={transcriptGap(visibleItems[index - 1], item)}
-        />
-      ))}
-      {streams.map((stream) => (
-        <Box key={stream.id} marginBottom={1} flexDirection="column">
-          <Text color={COLORS.info}>Assistant</Text>
-          <MarkdownBlock text={compactLine(stream.content, 2000)} color={COLORS.text} />
-        </Box>
+      {visibleLines.map((line) => (
+        <Text
+          key={line.id}
+          color={line.payload.color}
+          dimColor={line.payload.dim}
+          wrap="truncate"
+        >
+          {line.text ? (
+            <MarkdownInline text={line.text} color={line.payload.color} />
+          ) : (
+            " "
+          )}
+        </Text>
       ))}
     </Box>
   );
 }
-
-const TranscriptRow = React.memo(function TranscriptRow({
-  item,
-  expanded,
-  selected,
-  marginTop,
-}: {
-  item: TranscriptItem;
-  expanded: boolean;
-  selected: boolean;
-  marginTop: number;
-}) {
-  const isCollapsible = Boolean(item.collapsible);
-  const compactItem = isCompactTranscriptItem(item);
-  const isToolCall = item.kind === "tool_call";
-  const isToolOutput = item.kind === "tool_output";
-  const isInternal = transcriptGroup(item) === "internal";
-  const preview = transcriptPreview(item, Boolean(!isCollapsible || expanded));
-  const body = isCollapsible && !expanded ? preview : item.body;
-  const meta = transcriptMeta(item);
-  const label = compactLine(meta.label, COMPACT_LABEL_LENGTH);
-  const showMoreLabel = isCollapsible && !expanded ? "show more" : "";
-  const labelColor = selected ? COLORS.background : meta.labelColor;
-  const bodyColor = selected ? COLORS.background : meta.bodyColor;
-  const selectedBackground = selected ? COLORS.accent : undefined;
-  const inlineBody = compactItem ? compactLine(body, COMPACT_BODY_LENGTH) : body;
-  const renderInline = compactItem && inlineBody.trim() && !inlineBody.includes("\n");
-  const bodyPrefix = isToolOutput ? `${toolOutputName(item.title)} ` : "";
-  const expandedMarker = isCollapsible ? (expanded ? "[-] " : "") : "";
-  const rowMarginBottom = compactItem || isInternal ? 0 : 1;
-
-  if (isCollapsible && !expanded) {
-    return (
-      <Box marginTop={marginTop} marginBottom={rowMarginBottom} flexDirection="row">
-        <Text color={labelColor} backgroundColor={selectedBackground} dimColor={isInternal}>
-          {label ? `${label}: ` : ""}
-        </Text>
-        <Text color={bodyColor} backgroundColor={selectedBackground} dimColor={isInternal}>
-          <MarkdownInline text={preview} color={bodyColor} />
-        </Text>
-        {showMoreLabel ? (
-          <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={selectedBackground}>
-            {" "}
-            {showMoreLabel}
-          </Text>
-        ) : null}
-      </Box>
-    );
-  }
-
-  if (renderInline) {
-    return (
-      <Box marginTop={marginTop} marginBottom={rowMarginBottom} flexDirection="row">
-        <Text color={labelColor} backgroundColor={selectedBackground} dimColor={isInternal}>
-          {expandedMarker}
-          {label}:{" "}
-        </Text>
-        <Text color={bodyColor} backgroundColor={selectedBackground} dimColor={isToolCall || isToolOutput}>
-          {bodyPrefix}
-          <MarkdownInline text={inlineBody} color={bodyColor} />
-        </Text>
-      </Box>
-    );
-  }
-
-  if (!isCollapsible && !compactItem && body.trim() && !body.includes("\n")) {
-    return (
-      <Box marginTop={marginTop} marginBottom={rowMarginBottom} flexDirection="row">
-        <Text color={labelColor} backgroundColor={selectedBackground}>
-          {label}:{" "}
-        </Text>
-        <Text color={bodyColor} backgroundColor={selectedBackground}>
-          <MarkdownInline text={body} color={bodyColor} />
-        </Text>
-      </Box>
-    );
-  }
-
-  return (
-    <Box flexDirection="column" marginTop={marginTop} marginBottom={rowMarginBottom}>
-      <Box flexDirection="row">
-        <Text color={labelColor} backgroundColor={selectedBackground} dimColor={isInternal}>
-          {expandedMarker}
-          {label}
-        </Text>
-        {isCollapsible ? (
-          <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={selectedBackground}>
-            {" "}
-            {expanded ? "collapse" : "show more"}
-          </Text>
-        ) : null}
-      </Box>
-      {body.trim() ? (
-        <Box flexDirection="column" marginLeft={2}>
-          {bodyPrefix ? (
-            <Text color={bodyColor} backgroundColor={selectedBackground} dimColor={isToolCall || isToolOutput}>
-              {bodyPrefix}
-            </Text>
-          ) : null}
-          <MarkdownBlock text={body} color={bodyColor} />
-        </Box>
-      ) : null}
-    </Box>
-  );
-});
 
 function workerStatusColor(status: string): string {
   if (status === "completed") return COLORS.success;
@@ -712,277 +971,293 @@ function workerStatusColor(status: string): string {
   return COLORS.info;
 }
 
-function formatArgs(args?: Record<string, unknown>): string {
-  if (!args) return "";
-  try {
-    return compactLine(JSON.stringify(args), 140);
-  } catch {
-    return "";
-  }
+function workerRoleColor(role: string): string {
+  if (role === "implementer") return COLORS.accent;
+  if (role === "verifier") return COLORS.success;
+  if (role === "summarizer") return COLORS.info;
+  if (role === "explorer") return "#b48ead";
+  return COLORS.text;
 }
 
-function WorkerActivityRow({
-  activity,
-  selected,
+function workerStatusMark(status: string): string {
+  if (status === "running") return "*";
+  if (status === "completed") return "✓";
+  if (status === "failed") return "x";
+  if (status === "stopped") return "■";
+  return "○";
+}
+
+function workerActivityColor(activity: WorkerActivityItem): string {
+  if (activity.type === "tool_call") return COLORS.info;
+  if (activity.type === "tool_output") return COLORS.dim;
+  if (activity.type === "notification") return COLORS.text;
+  if (activity.type === "status") return workerStatusColor(activity.title.split(/\s+/).at(-1) ?? "");
+  return COLORS.dim;
+}
+
+function workerActivityMarkerColor(activity: WorkerActivityItem): string {
+  if (activity.type === "tool_call") return COLORS.accent;
+  return workerActivityColor(activity);
+}
+
+function workerResultMarker(result: WorkerResultLine): string {
+  if (result.kind === "summary") return "✓";
+  if (result.kind === "section") return "─";
+  if (result.kind === "risk") return "!";
+  if (result.kind === "next") return ">";
+  if (result.kind === "continuation") return " ";
+  return "•";
+}
+
+function workerResultColor(result: WorkerResultLine, status: string): string {
+  if (result.kind === "section" || result.kind === "item" || result.kind === "continuation") return COLORS.dim;
+  if (result.kind === "risk") return COLORS.danger;
+  if (result.kind === "next") return COLORS.info;
+  if (result.kind === "fallback") return workerStatusColor(status);
+  return COLORS.text;
+}
+
+function workerResultMarkerColor(result: WorkerResultLine, status: string): string {
+  if (result.kind === "section") return COLORS.border;
+  if (result.kind === "risk") return COLORS.danger;
+  if (result.kind === "next") return COLORS.accent;
+  if (result.kind === "summary") return workerStatusColor(status);
+  return COLORS.dim;
+}
+
+function WorkerPaneBodyRow({
+  row,
   width,
 }: {
-  activity: WorkerActivityItem;
-  selected: boolean;
+  row: WorkerPaneRow;
   width: number;
 }) {
-  const labelColor = selected ? COLORS.background : activity.type === "thinking" ? COLORS.dim : COLORS.info;
-  const selectedBackground = selected ? COLORS.accent : undefined;
-  const previewWidth = Math.max(16, width - activity.title.length - 24);
-  const typeLabel =
-    activity.type === "tool_call"
-      ? "call"
-      : activity.type === "tool_output"
-        ? "out"
-        : activity.type === "thinking"
-          ? "think"
-          : activity.type;
+  if (row.type === "blank") return <Text> </Text>;
+  if (row.type === "waiting") return <Text color={COLORS.dim}>{row.text}</Text>;
+  if (row.type === "result_separator") {
+    return <Text color={COLORS.border} wrap="truncate">{compactLine(` ${"─".repeat(Math.max(0, width - 1))}`, width)}</Text>;
+  }
+  if (row.type === "result") {
+    const marker = workerResultMarker(row.result);
+    const text = compactLine(row.result.text, Math.max(1, width - 4));
+    return (
+      <Text wrap="truncate">
+        <Text color={workerResultMarkerColor(row.result, row.status)}>{` ${marker} `}</Text>
+        <Text color={workerResultColor(row.result, row.status)}>{text}</Text>
+      </Text>
+    );
+  }
+
+  const labelWidth = Math.min(14, Math.max(0, width - 6));
+  const label = compactLine(row.line.label, labelWidth).padEnd(labelWidth);
+  const prefix = ` ${row.line.marker} `;
+  const detail = row.line.detail ? ` ${row.line.detail}` : "";
+  const availableDetailWidth = Math.max(0, width - prefix.length - label.length);
+  const displayedDetail = availableDetailWidth > 1 ? compactLine(detail, availableDetailWidth) : "";
 
   return (
-    <Box>
-      <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={selectedBackground}>
-        {selected ? "> " : "  "}
-        {typeLabel.padEnd(5)}
-      </Text>
-      <Text color={labelColor} backgroundColor={selectedBackground}>
-        {compactLine(activity.title, 28)}
-      </Text>
-      {activity.timestamp ? (
-        <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={selectedBackground}>
-          {" "}
-          {formatWorkerTimestamp(activity.timestamp)}
-        </Text>
-      ) : null}
-      {activity.preview ? (
-        <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={selectedBackground}>
-          {" "}
-          {compactLine(activity.preview, previewWidth)}
-        </Text>
-      ) : null}
+    <Text wrap="truncate">
+      <Text color={workerActivityMarkerColor(row.line.activity)}>{prefix}</Text>
+      <Text color={workerActivityColor(row.line.activity)}>{label}</Text>
+      <Text color={COLORS.dim}>{displayedDetail}</Text>
+    </Text>
+  );
+}
+
+function WorkerPaneHeader({
+  worker,
+  width,
+}: {
+  worker: WorkerState;
+  width: number;
+}) {
+  const prefix = " ";
+  const suffix = worker.status;
+  const role = worker.role && worker.role !== "worker" ? worker.role : "";
+  const roleText = role ? `[${compactLine(role, 12)}] ` : "";
+  const titleWidth = Math.max(8, width - prefix.length - suffix.length - roleText.length - 5);
+  const title = compactLine(worker.title, titleWidth);
+  const lineLength = prefix.length + 2 + roleText.length + title.length + suffix.length + 1;
+  const spacer = lineLength < width ? " " : "";
+
+  return (
+    <Text wrap="truncate">
+      <Text color={workerStatusColor(worker.status)}>{`${prefix}${workerStatusMark(worker.status)} `}</Text>
+      {roleText ? <Text color={workerRoleColor(worker.role)}>{roleText}</Text> : null}
+      <Text color={COLORS.text}>{title}</Text>
+      <Text>{spacer}</Text>
+      <Text color={workerStatusColor(worker.status)}>{suffix}</Text>
+    </Text>
+  );
+}
+
+function WorkerPaneBody({
+  worker,
+  width,
+  height,
+}: {
+  worker: WorkerState;
+  width: number;
+  height: number;
+}) {
+  const bodyRows = Math.max(0, height - 1);
+  const rows = buildWorkerPaneRows(worker, width, bodyRows);
+
+  return (
+    <>
+      {rows.map((row, index) => (
+        <WorkerPaneBodyRow
+          key={`${worker.id}-body-${index}`}
+          row={row}
+          width={Math.max(24, width)}
+        />
+      ))}
+    </>
+  );
+}
+
+function WorkerPane({
+  worker,
+  width,
+  height,
+}: {
+  worker: WorkerState;
+  width: number;
+  height: number;
+}) {
+  const innerWidth = Math.max(10, width);
+
+  return (
+    <Box
+      flexDirection="column"
+      width={width}
+      height={height}
+    >
+      <WorkerPaneHeader worker={worker} width={innerWidth} />
+      <WorkerPaneBody
+        worker={worker}
+        width={innerWidth}
+        height={height}
+      />
     </Box>
   );
 }
 
-function WorkerBoard({
+const MemoWorkerPane = memo(
+  WorkerPane,
+  (previous, next) =>
+    previous.worker === next.worker &&
+    previous.width === next.width &&
+    previous.height === next.height,
+);
+
+export function workerPaneHeights(totalHeight: number, workerCount: number): number[] {
+  if (workerCount <= 0) return [];
+  const separatorRows = workerSeparatorCount(totalHeight, workerCount);
+  const contentRows = Math.max(0, totalHeight - separatorRows);
+  const baseHeight = Math.floor(contentRows / workerCount);
+  const extraRows = contentRows % workerCount;
+
+  return Array.from(
+    { length: workerCount },
+    (_, index) => baseHeight + (index < extraRows ? 1 : 0),
+  );
+}
+
+export function workerSeparatorCount(totalHeight: number, workerCount: number): number {
+  if (workerCount <= 1) return 0;
+  return Math.min(workerCount - 1, Math.max(0, totalHeight - workerCount));
+}
+
+export function shouldRenderWorkerSeparator(
+  workerIndex: number,
+  workerCount: number,
+  separatorCount = Math.max(0, workerCount - 1),
+): boolean {
+  return workerIndex >= 0 && workerIndex < workerCount - 1 && workerIndex < separatorCount;
+}
+
+function todoStatusIcon(status: string): string {
+  if (status === "completed") return "✓";
+  if (status === "in_progress") return "→";
+  return "○";
+}
+
+function todoStatusColor(status: string): string {
+  if (status === "completed") return COLORS.success;
+  if (status === "in_progress") return COLORS.accent;
+  return COLORS.dim;
+}
+
+function TodoPanel({ todos, width }: { todos: TodoItem[]; width: number }) {
+  if (todos.length === 0) return null;
+  const innerWidth = Math.max(10, width - 4);
+  const title = `Tasks (${todos.length})`;
+  return (
+    <Box
+      flexDirection="column"
+      width={width}
+      borderStyle="round"
+      borderColor={COLORS.border}
+      paddingX={1}
+    >
+      <Text color={COLORS.accent} wrap="truncate">
+        {compactLine(title, innerWidth)}
+      </Text>
+      {todos.map((todo, index) => (
+        <Text key={`${todo.task}-${index}`} wrap="truncate">
+          <Text color={todoStatusColor(todo.status)}>{`${todoStatusIcon(todo.status)} `}</Text>
+          <Text color={COLORS.text}>{compactLine(todo.task, Math.max(1, innerWidth - 2))}</Text>
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+function WorkerPanes({
   workers,
-  interactive,
-  width,
-  onExpandedChange,
+  layout,
+  height,
 }: {
   workers: WorkerState[];
-  interactive: boolean;
-  width: number;
-  onExpandedChange: (expanded: boolean) => void;
+  layout: WorkerPaneLayout;
+  height: number;
 }) {
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const [manualSelection, setManualSelection] = useState(false);
-  const [openWorkerId, setOpenWorkerId] = useState<string | null>(null);
-  const [selectedActivityIndex, setSelectedActivityIndex] = useState(0);
-  const [expandedActivityIds, setExpandedActivityIds] = useState<Record<string, boolean>>({});
-  const selectedWorker = workers[Math.min(selectedIndex, workers.length - 1)];
-  const openedWorker = openWorkerId
-    ? workers.find((worker) => worker.id === openWorkerId) ?? null
-    : null;
-  const activity = openedWorker
-    ? openedWorker.activityOrder
-        .map((id) => openedWorker.activityById[id])
-        .filter((item): item is WorkerActivityItem => Boolean(item))
-        .slice(-6)
-    : [];
-  const selectedActivity = activity[selectedActivityIndex];
-
-  useEffect(() => {
-    setSelectedIndex((current) => Math.min(Math.max(0, current), Math.max(0, workers.length - 1)));
-  }, [workers.length]);
-
-  useEffect(() => {
-    if (manualSelection) return;
-    const newestRunningIndex = workers
-      .map((worker, index) => ({ worker, index }))
-      .filter(({ worker }) => worker.status === "running")
-      .sort((a, b) => (b.worker.lastUpdatedAt ?? 0) - (a.worker.lastUpdatedAt ?? 0))[0]?.index;
-    if (newestRunningIndex !== undefined) {
-      setSelectedIndex(newestRunningIndex);
-    }
-  }, [manualSelection, workers]);
-
-  useEffect(() => {
-    setSelectedActivityIndex((current) => Math.min(current, Math.max(0, activity.length - 1)));
-  }, [activity.length]);
-
-  useEffect(() => {
-    onExpandedChange(Boolean(openedWorker));
-  }, [onExpandedChange, openedWorker]);
-
-  useInput((input, key) => {
-    if (!interactive) return;
-    if (key.escape) {
-      setOpenWorkerId(null);
-      return;
-    }
-    if (key.leftArrow && openWorkerId) {
-      setOpenWorkerId(null);
-      return;
-    }
-    if (key.rightArrow && selectedWorker) {
-      setOpenWorkerId(selectedWorker.id);
-      return;
-    }
-    if (key.upArrow) {
-      setManualSelection(true);
-      setSelectedIndex((current) => Math.max(0, current - 1));
-      return;
-    }
-    if (key.downArrow) {
-      setManualSelection(true);
-      setSelectedIndex((current) => Math.min(workers.length - 1, current + 1));
-      return;
-    }
-    if (input === "k" && activity.length > 0) {
-      setSelectedActivityIndex((current) => Math.max(0, current - 1));
-      return;
-    }
-    if (input === "j" && activity.length > 0) {
-      setSelectedActivityIndex((current) => Math.min(activity.length - 1, current + 1));
-      return;
-    }
-    if (input === " " && activity[selectedActivityIndex]) {
-      const selectedActivity = activity[selectedActivityIndex];
-      setExpandedActivityIds((current) => ({
-        ...current,
-        [selectedActivity.id]: !current[selectedActivity.id],
-      }));
-      return;
-    }
-    if (key.return && selectedWorker) {
-      setManualSelection(true);
-      setOpenWorkerId((current) => (current === selectedWorker.id ? null : selectedWorker.id));
-    }
-  });
-
   if (workers.length === 0) return null;
 
+  const innerWidth = Math.max(24, layout.paneWidth - 4);
+  const innerHeight = Math.max(1, height - 3);
+  const paneHeights = workerPaneHeights(innerHeight, workers.length);
+  const separatorCount = workerSeparatorCount(innerHeight, workers.length);
   const runningCount = workers.filter((worker) => worker.status === "running").length;
-  const title = openWorkerId ? "Workers" : `Workers ${workers.length}`;
-  const hint = interactive
-    ? openWorkerId
-      ? "↑↓ worker  j/k activity  Space expand  Esc close"
-      : "↑↓ select  Enter details"
-    : "Tab focus";
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor={interactive ? COLORS.accentSoft : COLORS.border} paddingX={1}>
-      <Box>
-        <Text color={COLORS.accent}>{title}</Text>
-        <Text color={COLORS.dim}>
-          {" "}
-          {runningCount} running
-          {"  "}
-          {hint}
-        </Text>
-      </Box>
-      {workers.map((worker, index) => {
-        const selected = interactive && index === selectedIndex;
-        const backgroundColor = selected ? COLORS.accent : undefined;
-        const foreground = selected ? COLORS.background : COLORS.text;
-        const countLabel = `${worker.activityCounts.thinking}T ${worker.activityCounts.toolCall}C ${worker.activityCounts.toolOutput}O`;
-        const statusMark =
-          worker.status === "running"
-            ? "●"
-            : worker.status === "completed"
-              ? "✓"
-              : worker.status === "failed"
-                ? "×"
-                : worker.status === "stopped"
-                  ? "■"
-                  : "○";
-        const availableSummaryWidth = Math.max(0, width - worker.title.length - worker.role.length - countLabel.length - 38);
-        const rowSummary = index === selectedIndex ? compactLine(worker.summary || worker.description, availableSummaryWidth) : "";
+  const separator = compactLine("─".repeat(innerWidth), innerWidth);
 
+  return (
+    <Box
+      flexDirection="column"
+      width={layout.paneWidth}
+      height={height}
+      borderStyle="round"
+      borderColor={runningCount ? COLORS.info : COLORS.border}
+      paddingX={1}
+    >
+      <Text color={COLORS.accent} wrap="truncate">
+        {compactLine(`Workers ${workers.length}${runningCount ? `  ${runningCount} running` : ""}`, innerWidth)}
+      </Text>
+      {workers.map((worker, index) => {
         return (
-          <Box key={worker.id}>
-            <Text color={foreground} backgroundColor={backgroundColor}>
-              {selected ? ">" : " "} {statusMark} {compactLine(worker.title, 24)}
-            </Text>
-            <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={backgroundColor}>
-              {" "}
-              {worker.role}
-            </Text>
-            <Text color={selected ? COLORS.background : workerStatusColor(worker.status)} backgroundColor={backgroundColor}>
-              {" "}
-              {worker.status}
-            </Text>
-            <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={backgroundColor}>
-              {" "}
-              {countLabel}
-            </Text>
-            {rowSummary ? (
-              <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={backgroundColor}>
-                {" "}
-                {rowSummary}
-              </Text>
+          <Fragment key={worker.id}>
+            <MemoWorkerPane
+              worker={worker}
+              width={innerWidth}
+              height={paneHeights[index] ?? 0}
+            />
+            {shouldRenderWorkerSeparator(index, workers.length, separatorCount) ? (
+              <Text color={COLORS.border} wrap="truncate">{separator}</Text>
             ) : null}
-          </Box>
+          </Fragment>
         );
       })}
-      {openedWorker ? (
-        <Box flexDirection="column" marginTop={1} paddingX={1}>
-          <Box>
-            <Text color={COLORS.success}>{openedWorker.title}</Text>
-            <Text color={COLORS.dim}>
-              {" "}
-              detail  {activity.length}/{openedWorker.activityOrder.length} shown
-            </Text>
-          </Box>
-          {activity.length === 0 ? (
-            <Text color={COLORS.dim}>No worker activity yet.</Text>
-          ) : (
-            activity.map((item, index) => (
-              <WorkerActivityRow
-                key={item.id}
-                activity={item}
-                selected={interactive && index === selectedActivityIndex}
-                width={Math.max(40, width - 6)}
-              />
-            ))
-          )}
-          {selectedActivity ? (
-            <Box flexDirection="column" marginTop={1}>
-              {selectedActivity.type === "tool_call" && formatArgs(selectedActivity.args) ? (
-                <Text color={COLORS.dim}>
-                  args {compactLine(formatArgs(selectedActivity.args), Math.max(40, width - 10))}
-                </Text>
-              ) : null}
-              {selectedActivity.content || selectedActivity.preview ? (
-                <Text color={selectedActivity.type === "tool_output" ? COLORS.dim : COLORS.text}>
-                  <MarkdownInline
-                    text={compactLine(
-                      expandedActivityIds[selectedActivity.id]
-                        ? selectedActivity.content || selectedActivity.preview
-                        : selectedActivity.preview || selectedActivity.content,
-                      expandedActivityIds[selectedActivity.id] ? 900 : Math.max(80, width - 10),
-                    )}
-                    color={selectedActivity.type === "tool_output" ? COLORS.dim : COLORS.text}
-                  />
-                </Text>
-              ) : null}
-            </Box>
-          ) : null}
-          {openedWorker.result ? (
-            <Box marginTop={1}>
-              <Text color={workerStatusColor(openedWorker.status)}>
-                final {openedWorker.status}:{" "}
-              </Text>
-              <Text color={COLORS.text}>
-                {compactLine(openedWorker.result, Math.max(40, width - 18))}
-              </Text>
-            </Box>
-          ) : null}
-        </Box>
-      ) : null}
     </Box>
   );
 }
@@ -990,16 +1265,37 @@ function WorkerBoard({
 function SectionCard({
   title,
   children,
+  width,
 }: {
   title: string;
   children: React.ReactNode;
+  width?: number;
 }) {
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={COLORS.border} paddingX={1}>
-      <Text color={COLORS.accent}>{title}</Text>
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={COLORS.borderMuted}
+      paddingX={1}
+      width={width}
+    >
+      <Text color={COLORS.accent} wrap="truncate">{title}</Text>
       {children}
     </Box>
   );
+}
+
+function commandAvailable(command: string, availableCommands: Set<string>): boolean {
+  return availableCommands.has(command);
+}
+
+function formatCommandGroup(
+  commands: string[],
+  availableCommands: Set<string>,
+  width: number,
+): string {
+  const visibleCommands = commands.filter((command) => commandAvailable(command, availableCommands));
+  return compactLine(visibleCommands.join("  "), width);
 }
 
 function WelcomePanel({
@@ -1011,56 +1307,76 @@ function WelcomePanel({
   commands: CommandOption[];
   width: number;
 }) {
-  const suggestions = [
-    { command: "/plan", example: "build auth system", label: "Scope a change" },
-    { command: "/review", example: "current repo", label: "Audit the repo" },
-    { command: "/debug", example: "failing tests", label: "Fix failures" },
-    { command: "/mode", example: "coordinator", label: "Use multi-agent flow" },
-    { command: "/models", example: "", label: "Switch model" },
-    { command: "/context", example: "", label: "Inspect loaded context" },
-    { command: "/compact", example: "", label: "Trim conversation state" },
-    { command: "/skills", example: "", label: "Load project skills" },
-    { command: "/connect", example: "", label: "Configure provider keys" },
-  ];
-
-  const recentSessions = [
-    "websocket refactor",
-    "memory optimization",
-    "rag pipeline",
-  ];
-
   const availableCommands = new Set(commands.map((c) => c.name));
-  const workspaceLabel = truncateMiddle(homeCompressed(cwd), Math.max(28, width - 18));
-
-  const quickStart = suggestions
-    .filter((s) => availableCommands.has(s.command) || s.command === "/debug")
-    .slice(0, 3)
-    .map((s) => `${s.command}${s.example ? ` ${s.example}` : ""}`)
-    .join("   ");
+  const panelWidth = Math.max(1, width);
+  const innerWidth = Math.max(1, panelWidth - 4);
+  const workspaceLabel = truncateMiddle(homeCompressed(cwd), Math.max(18, innerWidth - 12));
+  const planningCommands = formatCommandGroup(["/plan", "/mode", "/skills"], availableCommands, innerWidth - 9);
+  const setupCommands = formatCommandGroup(["/models", "/connect"], availableCommands, innerWidth - 7);
+  const contextCommands = formatCommandGroup(["/context", "/compact", "/help"], availableCommands, innerWidth - 9);
 
   return (
-    <SectionCard title="Welcome">
-      <Text color={COLORS.text}>Ready to work in {workspaceLabel}</Text>
-      <Text color={COLORS.dim}>Start typing below or use a shortcut like {quickStart}</Text>
-      <Text color={COLORS.dim}>Recent: {recentSessions.join("  ·  ")}</Text>
+    <SectionCard title="Workspace ready" width={panelWidth}>
+      <Text wrap="truncate">
+        <Text color={COLORS.muted}>cwd </Text>
+        <Text color={COLORS.text}>{workspaceLabel}</Text>
+      </Text>
+      <Text wrap="truncate">
+        <Text color={COLORS.accent}>Plan </Text>
+        <Text color={COLORS.dim}>{planningCommands || "type a task directly"}</Text>
+      </Text>
+      <Text wrap="truncate">
+        <Text color={COLORS.accent}>Setup </Text>
+        <Text color={COLORS.dim}>{setupCommands || "provider and model configured"}</Text>
+      </Text>
+      <Text wrap="truncate">
+        <Text color={COLORS.accent}>State </Text>
+        <Text color={COLORS.dim}>{contextCommands || "conversation controls unavailable"}</Text>
+      </Text>
     </SectionCard>
   );
 }
 
-function Banner({ logo, subtitle }: { logo: string[]; subtitle?: string }) {
+function Banner({ logo, subtitle, width }: { logo: string[]; subtitle?: string; width: number }) {
+  const useWideBanner = shouldUseWideBanner(width);
+  const tagline = subtitle === "Your coding sidekick"
+    ? "AI development cockpit for terminal-first engineering"
+    : subtitle;
+
+  if (!useWideBanner) {
+    const innerWidth = Math.max(18, width - 4);
+    return (
+      <Box flexDirection="column" marginBottom={1}>
+        <Text color={COLORS.accent} bold wrap="truncate">
+          {compactLine("TERMINUS", innerWidth)}
+        </Text>
+        <Text color={COLORS.dim} wrap="truncate">
+          {compactLine("agentic engineering in your terminal", innerWidth)}
+        </Text>
+        <Text color={COLORS.dim} wrap="truncate">
+          {compactLine(tagline ?? "", innerWidth)}
+        </Text>
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" marginBottom={1}>
       {logo.map((line, index) => (
-        <Text key={`${line}-${index}`} color={COLORS.accent}>
-          {line}
+        <Text key={`${line}-${index}`} color={index === 0 ? COLORS.info : COLORS.accent}>
+          {truncatePreservingWhitespace(line, width)}
         </Text>
       ))}
-      {subtitle ? <Text color={COLORS.dim}>{subtitle}</Text> : null}
+      {tagline ? (
+        <Text color={COLORS.dim} wrap="truncate">
+          {compactLine(tagline, Math.max(1, width))}
+        </Text>
+      ) : null}
     </Box>
   );
 }
 
-function SelectionModal<T extends { name: string; description?: string }>({
+function SelectionModal<T extends { name: string; description?: string; loaded?: boolean }>({
   title,
   subtitle,
   options,
@@ -1072,9 +1388,20 @@ function SelectionModal<T extends { name: string; description?: string }>({
   onSelect: (name: string | null) => void;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const optionRange = visibleOptionRange(options.length, selectedIndex, MODAL_OPTION_ROWS);
+  const visibleOptions = options.slice(optionRange.start, optionRange.end);
+
   useInput((input, key) => {
     if (key.escape) {
       onSelect(null);
+      return;
+    }
+    if (key.pageUp) {
+      setSelectedIndex((current) => Math.max(0, current - MODAL_OPTION_ROWS));
+      return;
+    }
+    if (key.pageDown) {
+      setSelectedIndex((current) => Math.min(options.length - 1, current + MODAL_OPTION_ROWS));
       return;
     }
     if (key.upArrow) {
@@ -1101,18 +1428,545 @@ function SelectionModal<T extends { name: string; description?: string }>({
     <Box flexDirection="column" borderStyle="double" borderColor={COLORS.accent} paddingX={1}>
       <Text color={COLORS.accent}>{title}</Text>
       <Text color={COLORS.dim}>{subtitle}</Text>
-      {options.map((option, index) => (
+      {visibleOptions.map((option, visibleIndex) => {
+        const index = optionRange.start + visibleIndex;
+        return (
         <Text
           key={option.name}
           color={index === selectedIndex ? COLORS.background : COLORS.text}
           backgroundColor={index === selectedIndex ? COLORS.accent : undefined}
         >
-          {`${index + 1}. ${option.name}${option.description ? ` - ${option.description}` : ""}`}
+          {`${index + 1}. ${option.name}${option.loaded ? " [loaded]" : ""}${option.description ? ` - ${option.description}` : ""}`}
         </Text>
-      ))}
-      <Text color={COLORS.dim}>Enter choose  Esc cancel</Text>
+        );
+      })}
+      <Text color={COLORS.dim}>
+        {`Enter choose  Esc cancel${options.length > MODAL_OPTION_ROWS ? `  ${optionRange.start + 1}-${optionRange.end}/${options.length}` : ""}`}
+      </Text>
     </Box>
   );
+}
+
+function QuestionModal({
+  questions,
+  onSubmit,
+}: {
+  questions: GuidedQuestion[];
+  onSubmit: (content: string) => void;
+}) {
+  const usesReviewStep = shouldUseQuestionReview(questions);
+  const reviewSubmitIndex = questions.length;
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [optionIndex, setOptionIndex] = useState(0);
+  const [phase, setPhase] = useState<"answering" | "reviewing">("answering");
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [editingFromReview, setEditingFromReview] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
+  const [cursor, setCursor] = useState(0);
+  const [notes, setNotes] = useState(() => questions.map(() => ""));
+  const [selectedOptions, setSelectedOptions] = useState<number[][]>(() => questions.map(() => []));
+  const notesRef = useRef(notes);
+  const selectedOptionsRef = useRef(selectedOptions);
+  const question = questions[questionIndex] ?? {
+    text: "Please clarify your preference.",
+    options: ["Use the recommended default", "Let me decide manually", "Skip this for now"] as [string, string, string],
+    allowMultiple: false,
+  };
+  const note = notes[questionIndex] ?? "";
+  const currentSelections = selectedOptions[questionIndex] ?? [];
+  const actionLabel = questionActionLabel(questionIndex, questions.length, usesReviewStep);
+  const reviewItems = buildQuestionReviewItems(questions, selectedOptions, notes);
+  const isReviewing = phase === "reviewing";
+
+  useEffect(() => {
+    setCursor((notes[questionIndex] ?? "").length);
+  }, [notes, questionIndex]);
+
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+
+  useEffect(() => {
+    selectedOptionsRef.current = selectedOptions;
+  }, [selectedOptions]);
+
+  useInput((input, key) => {
+    if (isSgrMouseInput(input)) return;
+    if (key.escape) {
+      onSubmit("");
+      return;
+    }
+    if (isReviewing) {
+      if (key.upArrow) {
+        setReviewIndex((current) => previousCyclicIndex(current, reviewSubmitIndex + 1));
+        return;
+      }
+      if (key.downArrow) {
+        setReviewIndex((current) => nextCyclicIndex(current, reviewSubmitIndex + 1));
+        return;
+      }
+      if (input >= "1" && input <= "9") {
+        setReviewIndex(Math.min(reviewSubmitIndex, Number(input) - 1));
+        return;
+      }
+      if (key.return) {
+        if (reviewIndex === reviewSubmitIndex) {
+          onSubmit(buildQuestionAnswerSummary(questions, selectedOptionsRef.current, notesRef.current));
+          return;
+        }
+        startEditingQuestion({
+          nextQuestionIndex: reviewIndex,
+          selectedOptions: selectedOptionsRef.current,
+          setPhase,
+          setQuestionIndex,
+          setOptionIndex,
+          setInputFocused,
+          setEditingFromReview,
+        });
+      }
+      return;
+    }
+    if (input === "\t") {
+      setInputFocused((current) => !current);
+      return;
+    }
+    if (key.upArrow) {
+      setInputFocused(false);
+      setOptionIndex((current) => previousCyclicIndex(current, questionFocusTargetCount(question)));
+      return;
+    }
+    if (key.downArrow) {
+      setInputFocused(false);
+      setOptionIndex((current) => nextCyclicIndex(current, questionFocusTargetCount(question)));
+      return;
+    }
+    if (!inputFocused && key.leftArrow) {
+      moveToQuestion({
+        nextQuestionIndex: previousCyclicIndex(questionIndex, questions.length),
+        selectedOptions: selectedOptionsRef.current,
+        setQuestionIndex,
+        setOptionIndex,
+        setInputFocused,
+      });
+      return;
+    }
+    if (!inputFocused && key.rightArrow) {
+      moveToQuestion({
+        nextQuestionIndex: nextCyclicIndex(questionIndex, questions.length),
+        selectedOptions: selectedOptionsRef.current,
+        setQuestionIndex,
+        setOptionIndex,
+        setInputFocused,
+      });
+      return;
+    }
+    if (inputFocused && key.leftArrow) {
+      setCursor((current) => Math.max(0, current - 1));
+      return;
+    }
+    if (inputFocused && key.rightArrow) {
+      setCursor((current) => Math.min(note.length, current + 1));
+      return;
+    }
+    if (inputFocused && (key.backspace || key.delete)) {
+      deleteQuestionNoteCharacter(questionIndex, cursor, notesRef, setNotes, setCursor);
+      return;
+    }
+    if (key.return) {
+      if (inputFocused) {
+        setInputFocused(false);
+        setOptionIndex(questionSubmitIndex(question));
+        return;
+      }
+      if (optionIndex !== questionSubmitIndex(question)) {
+        toggleQuestionOption(questionIndex, optionIndex, question.allowMultiple, selectedOptionsRef, setSelectedOptions);
+        return;
+      }
+      applyQuestionAdvanceResult({
+        result: getQuestionAdvanceResult({
+          questionIndex,
+          questions,
+          notes: notesRef.current,
+          selectedOptions: selectedOptionsRef.current,
+        }),
+        questionIndex,
+        editingFromReview,
+        selectedOptions: selectedOptionsRef.current,
+        onSubmit,
+        setQuestionIndex,
+        setOptionIndex,
+        setInputFocused,
+        setPhase,
+        setReviewIndex,
+        setEditingFromReview,
+      });
+      return;
+    }
+    if (inputFocused && !key.ctrl && !key.meta && input.length > 0) {
+      insertQuestionNoteText(questionIndex, input, cursor, notesRef, setNotes, setCursor);
+    }
+  });
+
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor={COLORS.accent} paddingX={2} paddingY={1}>
+      <Box justifyContent="space-between">
+        <Text color={COLORS.accent} bold>
+          {isReviewing ? "Review answers" : `Question ${questionIndex + 1}/${questions.length}`}
+        </Text>
+        <Text color={COLORS.dim}>
+          {isReviewing ? "Edit or submit" : question.allowMultiple ? "Multi-select" : "Single choice"}
+        </Text>
+      </Box>
+      {isReviewing ? (
+        <ReviewQuestionList reviewItems={reviewItems} reviewIndex={reviewIndex} reviewSubmitIndex={reviewSubmitIndex} />
+      ) : (
+        <QuestionEditor
+          actionLabel={actionLabel}
+          cursor={cursor}
+          inputFocused={inputFocused}
+          note={note}
+          optionIndex={optionIndex}
+          question={question}
+          questionIndex={questionIndex}
+          currentSelections={currentSelections}
+        />
+      )}
+    </Box>
+  );
+}
+
+function QuestionEditor({
+  actionLabel,
+  cursor,
+  currentSelections,
+  inputFocused,
+  note,
+  optionIndex,
+  question,
+  questionIndex,
+}: {
+  actionLabel: string;
+  cursor: number;
+  currentSelections: number[];
+  inputFocused: boolean;
+  note: string;
+  optionIndex: number;
+  question: GuidedQuestion;
+  questionIndex: number;
+}) {
+  const actionFocused = !inputFocused && optionIndex === questionSubmitIndex(question);
+
+  return (
+    <>
+      <Box marginTop={1} marginBottom={1}>
+        <Text color={COLORS.text} bold>{question.text}</Text>
+      </Box>
+      <Box flexDirection="column">
+        {question.options.map((option, index) => {
+          const selected = currentSelections.includes(index);
+          const focused = !inputFocused && index === optionIndex;
+          const marker = selected ? "*" : "o";
+          return (
+            <Box key={`${questionIndex}-${option}`} marginY={0}>
+              <Text color={focused ? COLORS.background : selected ? COLORS.accent : COLORS.dim}>
+                {focused ? "> " : "  "}
+              </Text>
+              <Text
+                color={focused ? COLORS.background : selected ? COLORS.accent : COLORS.text}
+                backgroundColor={focused ? COLORS.accent : undefined}
+              >
+                {`${marker} ${index + 1}. ${option}`}
+              </Text>
+            </Box>
+          );
+        })}
+      </Box>
+      <Box marginTop={1}>
+        <Text color={inputFocused ? COLORS.accent : COLORS.dim}>{"Notes "}</Text>
+        <Text color={COLORS.dim}>{"(optional): "}</Text>
+        <Text color={COLORS.text}>{note.slice(0, cursor)}</Text>
+        <Text color={inputFocused ? COLORS.accent : COLORS.dim}>_</Text>
+        <Text color={COLORS.text}>{note.slice(cursor)}</Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text
+          color={actionFocused ? COLORS.background : COLORS.text}
+          backgroundColor={actionFocused ? COLORS.accent : undefined}
+          bold={actionFocused}
+        >
+          {actionFocused ? "> " : "  "}
+        </Text>
+        <Text
+          color={actionFocused ? COLORS.background : COLORS.text}
+          backgroundColor={actionFocused ? COLORS.accent : undefined}
+          bold={actionFocused}
+        >
+          {`  ${actionLabel}  `}
+        </Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={COLORS.dim}>
+          {`Enter ${actionFocused ? "activate button" : question.allowMultiple ? "toggle option" : "select option"}  Up/Down move  Left/Right question  Tab notes  Esc cancel`}
+        </Text>
+      </Box>
+    </>
+  );
+}
+
+function ReviewQuestionList({
+  reviewItems,
+  reviewIndex,
+  reviewSubmitIndex,
+}: {
+  reviewItems: QuestionReviewItem[];
+  reviewIndex: number;
+  reviewSubmitIndex: number;
+}) {
+  return (
+    <>
+      <Box marginTop={1} marginBottom={1} flexDirection="column">
+        {reviewItems.map((item, index) => {
+          const focused = reviewIndex === index;
+          return (
+            <Box key={`review-${index}`} flexDirection="column" marginBottom={index + REVIEW_SUBMIT_INDEX_OFFSET === reviewItems.length ? 0 : 1}>
+              <Text
+                color={focused ? COLORS.background : item.complete ? COLORS.text : COLORS.dim}
+                backgroundColor={focused ? COLORS.accent : undefined}
+                bold={focused}
+              >
+                {`${focused ? "> " : "  "}${index + 1}. ${item.statusLabel} ${item.question}`}
+              </Text>
+              <Text color={item.complete ? COLORS.dim : COLORS.danger}>{`     ${item.selectionSummary}`}</Text>
+              <Text color={COLORS.dim}>{`     Notes: ${item.noteSummary}`}</Text>
+            </Box>
+          );
+        })}
+      </Box>
+      <Box marginTop={1}>
+        <Text
+          color={reviewIndex === reviewSubmitIndex ? COLORS.background : COLORS.text}
+          backgroundColor={reviewIndex === reviewSubmitIndex ? COLORS.accent : undefined}
+          bold={reviewIndex === reviewSubmitIndex}
+        >
+          {`${reviewIndex === reviewSubmitIndex ? "> " : "  "}Submit answers`}
+        </Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={COLORS.dim}>{"Up/Down move  Enter edit/submit  1-3 jump  Esc cancel"}</Text>
+      </Box>
+    </>
+  );
+}
+
+function toggleQuestionOption(
+  questionIndex: number,
+  optionIndex: number,
+  allowMultiple: boolean,
+  selectedOptionsRef: MutableRefObject<number[][]>,
+  setSelectedOptions: Dispatch<SetStateAction<number[][]>>,
+): void {
+  const nextOptions = selectedOptionsRef.current.map((selected, index) => {
+    if (index !== questionIndex) return selected;
+    if (!allowMultiple) return [optionIndex];
+    return selected.includes(optionIndex)
+      ? selected.filter((candidate) => candidate !== optionIndex)
+      : [...selected, optionIndex].sort();
+  });
+  selectedOptionsRef.current = nextOptions;
+  setSelectedOptions(nextOptions);
+}
+
+function previousCyclicIndex(current: number, count: number): number {
+  if (count <= 0) return 0;
+  return (current - 1 + count) % count;
+}
+
+function nextCyclicIndex(current: number, count: number): number {
+  if (count <= 0) return 0;
+  return (current + 1) % count;
+}
+
+function questionSubmitIndex(question: GuidedQuestion): number {
+  return question.options.length;
+}
+
+function questionFocusTargetCount(question: GuidedQuestion): number {
+  return question.options.length + 1;
+}
+
+function insertQuestionNoteText(
+  questionIndex: number,
+  input: string,
+  cursor: number,
+  notesRef: MutableRefObject<string[]>,
+  setNotes: Dispatch<SetStateAction<string[]>>,
+  setCursor: Dispatch<SetStateAction<number>>,
+): void {
+  const nextNotes = notesRef.current.map((note, index) => (
+    index === questionIndex ? note.slice(0, cursor) + input + note.slice(cursor) : note
+  ));
+  notesRef.current = nextNotes;
+  setNotes(nextNotes);
+  setCursor((current) => current + input.length);
+}
+
+function deleteQuestionNoteCharacter(
+  questionIndex: number,
+  cursor: number,
+  notesRef: MutableRefObject<string[]>,
+  setNotes: Dispatch<SetStateAction<string[]>>,
+  setCursor: Dispatch<SetStateAction<number>>,
+): void {
+  if (cursor === 0) return;
+  const nextNotes = notesRef.current.map((note, index) => (
+    index === questionIndex ? note.slice(0, cursor - 1) + note.slice(cursor) : note
+  ));
+  notesRef.current = nextNotes;
+  setNotes(nextNotes);
+  setCursor((current) => current - 1);
+}
+
+function applyQuestionAdvanceResult(options: {
+  result: QuestionAdvanceResult;
+  questionIndex: number;
+  editingFromReview: boolean;
+  selectedOptions: number[][];
+  onSubmit: (content: string) => void;
+  setQuestionIndex: Dispatch<SetStateAction<number>>;
+  setOptionIndex: Dispatch<SetStateAction<number>>;
+  setInputFocused: Dispatch<SetStateAction<boolean>>;
+  setPhase: Dispatch<SetStateAction<"answering" | "reviewing">>;
+  setReviewIndex: Dispatch<SetStateAction<number>>;
+  setEditingFromReview: Dispatch<SetStateAction<boolean>>;
+}): void {
+  if (options.editingFromReview) {
+    options.setPhase("reviewing");
+    options.setReviewIndex(options.questionIndex);
+    options.setInputFocused(false);
+    options.setEditingFromReview(false);
+    return;
+  }
+  if (options.result.type === "submit") {
+    options.onSubmit(options.result.content);
+    return;
+  }
+  if (options.result.type === "enter_review") {
+    options.setPhase("reviewing");
+    options.setReviewIndex(0);
+    options.setInputFocused(false);
+    return;
+  }
+  options.setQuestionIndex(options.questionIndex + 1);
+  options.setOptionIndex(questionOptionIndex(options.selectedOptions, options.questionIndex + 1));
+  options.setInputFocused(false);
+}
+
+function startEditingQuestion(options: {
+  nextQuestionIndex: number;
+  selectedOptions: number[][];
+  setPhase: Dispatch<SetStateAction<"answering" | "reviewing">>;
+  setQuestionIndex: Dispatch<SetStateAction<number>>;
+  setOptionIndex: Dispatch<SetStateAction<number>>;
+  setInputFocused: Dispatch<SetStateAction<boolean>>;
+  setEditingFromReview: Dispatch<SetStateAction<boolean>>;
+}): void {
+  options.setEditingFromReview(true);
+  options.setPhase("answering");
+  moveToQuestion(options);
+}
+
+function moveToQuestion(options: {
+  nextQuestionIndex: number;
+  selectedOptions: number[][];
+  setQuestionIndex: Dispatch<SetStateAction<number>>;
+  setOptionIndex: Dispatch<SetStateAction<number>>;
+  setInputFocused: Dispatch<SetStateAction<boolean>>;
+}): void {
+  options.setQuestionIndex(options.nextQuestionIndex);
+  options.setOptionIndex(questionOptionIndex(options.selectedOptions, options.nextQuestionIndex));
+  options.setInputFocused(false);
+}
+
+export type QuestionAdvanceResult =
+  | { type: "next_question" }
+  | { type: "enter_review" }
+  | { type: "submit"; content: string };
+
+export function getQuestionAdvanceResult(options: {
+  questionIndex: number;
+  questions: GuidedQuestion[];
+  selectedOptions: number[][];
+  notes: string[];
+}): QuestionAdvanceResult {
+  const isLastQuestion = options.questionIndex + 1 === options.questions.length;
+  if (!isLastQuestion) return { type: "next_question" };
+  if (shouldUseQuestionReview(options.questions)) return { type: "enter_review" };
+  return {
+    type: "submit",
+    content: buildQuestionAnswerSummary(options.questions, options.selectedOptions, options.notes),
+  };
+}
+
+export function buildQuestionAnswerSummary(
+  questions: GuidedQuestion[],
+  selectedOptions: number[][],
+  notes: string[],
+): string {
+  const lines = ["Answers to your clarifying questions:", ""];
+  questions.forEach((question, index) => {
+    const selectedLabels = selectedOptions[index]?.map((optionIndex) => question.options[optionIndex]) ?? [];
+    const note = notes[index]?.trim() ?? "";
+    lines.push(`${index + 1}. ${question.text}`);
+    lines.push(`Selected options: ${selectedLabels.length ? selectedLabels.join(", ") : "None selected"}`);
+    lines.push(`Additional input: ${note || "None"}`);
+    lines.push("");
+  });
+  return lines.join("\n").trim();
+}
+
+export function shouldUseQuestionReview(questions: GuidedQuestion[]): boolean {
+  return questions.length > 1;
+}
+
+export function questionActionLabel(
+  questionIndex: number,
+  questionCount: number,
+  usesReviewStep: boolean,
+): string {
+  const isLastQuestion = questionIndex + 1 === questionCount;
+  if (!isLastQuestion) return "Next question";
+  return usesReviewStep ? "Review answers" : "Submit answer";
+}
+
+function questionOptionIndex(selectedOptions: number[][], questionIndex: number): number {
+  return selectedOptions[questionIndex]?.[0] ?? 0;
+}
+
+interface QuestionReviewItem {
+  question: string;
+  statusLabel: "[Done]" | "[Pending]";
+  selectionSummary: string;
+  noteSummary: string;
+  complete: boolean;
+}
+
+function buildQuestionReviewItems(
+  questions: GuidedQuestion[],
+  selectedOptions: number[][],
+  notes: string[],
+): QuestionReviewItem[] {
+  return questions.map((question, index) => {
+    const selectedLabels = selectedOptions[index]?.map((optionIndex) => question.options[optionIndex]) ?? [];
+    const noteSummary = notes[index]?.trim() || "None";
+    const complete = selectedLabels.length > 0;
+    return {
+      question: question.text,
+      statusLabel: complete ? "[Done]" : "[Pending]",
+      selectionSummary: selectedLabels.length ? selectedLabels.join(", ") : "No option selected",
+      noteSummary,
+      complete,
+    };
+  });
 }
 
 function ApiKeyModal({
@@ -1126,6 +1980,7 @@ function ApiKeyModal({
   const [cursor, setCursor] = useState(0);
 
   useInput((input, key) => {
+    if (isSgrMouseInput(input)) return;
     if (key.escape) {
       onSubmit("");
       return;
@@ -1170,26 +2025,69 @@ function ApiKeyModal({
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
-  const [focus, setFocus] = useState<"input" | "transcript" | "workers">("input");
-  const [workerBoardExpanded, setWorkerBoardExpanded] = useState(false);
+  const [expandedTranscriptIds, setExpandedTranscriptIds] = useState<Record<string, boolean>>({});
   const clientRef = useRef<SocketClient | null>(null);
   const { exit } = useApp();
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns ?? 100;
   const terminalHeight = stdout?.rows ?? 32;
+  const bannerRows = state.showIntro
+    ? calculateBannerRows(terminalWidth, Boolean(state.banner))
+    : 0;
+  const welcomeRows = state.showIntro ? WELCOME_ROWS : 0;
+  const transcriptTop = 1 + bannerRows + welcomeRows;
+  const transcriptLeft = 1;
   const transcriptItems = selectTranscriptItems(state);
   const streams = selectStreamingItems(state);
   const workers = selectWorkers(state);
   const hasTranscript = transcriptItems.length > 0;
   const hasWorkers = workers.length > 0;
-  const workersFocused = focus === "workers";
-  const transcriptHeight = calculateTranscriptHeight({
+  const hasTodos = state.todos.length > 0;
+  const todoPanelHeight = hasTodos
+    ? Math.min(10, Math.max(3, state.todos.length + 3))
+    : 0;
+  const workerPaneLayout = calculateWorkerPaneLayout({
+    terminalWidth,
     terminalHeight,
-    showIntro: state.showIntro,
     hasWorkers,
-    workerBoardExpanded,
+    workerCount: workers.length,
+  });
+  const mainContentRows = calculateMainContentRows({
+    terminalHeight,
+    bannerRows,
+    welcomeRows,
+    todoPanelRows: todoPanelHeight,
     isGenerating: state.isGenerating,
   });
+  const transcriptContentWidth = Math.max(10, workerPaneLayout.transcriptWidth - TRANSCRIPT_CHROME_COLUMNS);
+  const transcriptLines = buildTranscriptLines({
+    items: transcriptItems,
+    streams,
+    expandedIds: expandedTranscriptIds,
+    width: transcriptContentWidth,
+  });
+  const bottomWorkerPaneHeight = workerPaneLayout.placement === "bottom"
+    ? calculateBottomWorkerPaneHeight(workerPaneLayout.paneRows, mainContentRows)
+    : 0;
+  const transcriptHeight = calculateTranscriptFrameHeight({
+    mainContentRows,
+    renderedTranscriptRows: transcriptLines.length,
+    bottomWorkerPaneRows: bottomWorkerPaneHeight,
+  });
+  const sideWorkerPaneHeight = calculateSideWorkerPaneHeight({
+    mainContentRows,
+    transcriptHeight,
+    maxWorkerPaneRows: MAX_SIDE_WORKER_PANE_ROWS,
+  });
+  const workerPaneHeight = workerPaneLayout.placement === "side"
+    ? sideWorkerPaneHeight
+    : bottomWorkerPaneHeight;
+  const sideBySideHeight = calculateSideBySideHeight(
+    transcriptHeight,
+    workerPaneHeight,
+    mainContentRows,
+  );
+  useEffect(() => enableSgrMouseReporting(stdout), [stdout]);
 
   useEffect(() => {
     const socketPath = process.env.TERMINUS_SOCK;
@@ -1232,7 +2130,7 @@ export default function App() {
 
   const send = (
     payload: OutboundMessage,
-    closeSelection?: "model" | "provider" | "skill" | "apiKey",
+    closeSelection?: "model" | "provider" | "skill" | "apiKey" | "question",
   ) => {
     const client = clientRef.current;
     if (!client) {
@@ -1240,7 +2138,7 @@ export default function App() {
       return;
     }
     client.send(payload);
-    if (payload.type === "input") {
+    if (payload.type === "input" || (payload.type === "question_answer" && payload.content.trim())) {
       dispatch({ type: "input_sent" });
     }
     if (closeSelection) {
@@ -1270,65 +2168,55 @@ export default function App() {
         options={state.skillSelect.options}
         onSelect={(name) => send({ type: "skill_selected", name }, "skill")}
       />
+    ) : state.questionSession ? (
+      <QuestionModal
+        questions={state.questionSession.questions}
+        onSubmit={(content) => send({ type: "question_answer", content }, "question")}
+      />
     ) : state.apiKeyPrompt ? (
       <ApiKeyModal
         provider={state.apiKeyPrompt.provider}
         onSubmit={(key) => send({ type: "api_key_submitted", key }, "apiKey")}
       />
     ) : null;
+  const modalActive = Boolean(modal);
 
   useInput((input, key) => {
     if (modal) return;
-    if (key.tab) {
-      if (state.inputActive) {
-        const focusable: Array<"input" | "transcript" | "workers"> = ["input"];
-        if (transcriptItems.length > 0) focusable.push("transcript");
-        if (hasWorkers) focusable.push("workers");
-        setFocus((current) => {
-          const currentIndex = Math.max(0, focusable.indexOf(current));
-          return focusable[(currentIndex + 1) % focusable.length] ?? "input";
-        });
-        return;
-      }
-      const focusable: Array<"transcript" | "workers"> = [];
-      if (transcriptItems.length > 0) focusable.push("transcript");
-      if (hasWorkers) focusable.push("workers");
-      if (focusable.length > 0) {
-        setFocus((current) => {
-          const currentIndex = Math.max(0, focusable.indexOf(current as "transcript" | "workers"));
-          return focusable[(currentIndex + 1) % focusable.length] ?? "transcript";
-        });
-      }
-      return;
-    }
     if (!state.isGenerating || state.inputActive) return;
     if (key.ctrl && input === "c") {
       send({ type: "interrupt" });
     }
   });
 
-  useEffect(() => {
-    if (state.inputActive) {
-      setFocus("input");
-      return;
-    }
-    if (hasWorkers) {
-      setFocus("workers");
-      return;
-    }
-    setFocus("transcript");
-  }, [hasWorkers, state.inputActive]);
+  const transcriptView = transcriptHeight > 0 && (hasTranscript || state.isGenerating || streams.length > 0) ? (
+    <Transcript
+      lines={transcriptLines}
+      setExpandedIds={setExpandedTranscriptIds}
+      height={transcriptHeight}
+      mouseActive={!modal}
+      top={transcriptTop}
+      left={transcriptLeft}
+      width={workerPaneLayout.transcriptWidth}
+    />
+  ) : null;
 
-  useEffect(() => {
-    if (!hasWorkers) {
-      setWorkerBoardExpanded(false);
-    }
-  }, [hasWorkers]);
+  const workerPanes = hasWorkers ? (
+    <WorkerPanes
+      workers={workers}
+      layout={workerPaneLayout}
+      height={workerPaneHeight}
+    />
+  ) : null;
+
+  const todoPanel = hasTodos ? (
+    <TodoPanel todos={state.todos} width={terminalWidth} />
+  ) : null;
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={terminalWidth} height={terminalHeight}>
       {state.showIntro && state.banner ? (
-        <Banner logo={state.banner.logo} subtitle={state.banner.subtitle} />
+        <Banner logo={state.banner.logo} subtitle={state.banner.subtitle} width={terminalWidth} />
       ) : null}
       {state.showIntro ? (
         <WelcomePanel
@@ -1337,35 +2225,37 @@ export default function App() {
           width={terminalWidth}
         />
       ) : null}
-      {(hasTranscript || state.isGenerating || streams.length > 0) ? (
-        <Transcript
-          items={transcriptItems}
-          streams={streams}
-          height={transcriptHeight}
-          interactive={focus === "transcript" && !modal}
+      {modalActive ? (
+        <Box flexGrow={1} justifyContent="center" paddingX={1}>
+          {modal}
+        </Box>
+      ) : workerPaneLayout.placement === "side" && workerPanes ? (
+        <Box flexDirection="row" height={sideBySideHeight}>
+          <Box width={workerPaneLayout.transcriptWidth}>{transcriptView}</Box>
+          {workerPanes}
+        </Box>
+      ) : (
+        <>
+          {transcriptView}
+          {workerPanes}
+        </>
+      )}
+      {!modalActive ? todoPanel : null}
+      {!modalActive ? (
+        <InputPanel
+          active={state.inputActive}
+          commands={state.commands}
+          connectionError={state.connectionError}
+          isGenerating={state.isGenerating}
+          cwd={state.status.cwd}
+          model={state.status.model}
+          contextPercent={state.status.contextPercent}
+          width={terminalWidth}
+          onSubmit={(value) => send({ type: "input", content: value })}
+          onInterrupt={() => send({ type: "interrupt" })}
+          onCopyLast={() => send({ type: "copy_last_response" })}
         />
       ) : null}
-      <WorkerBoard
-        workers={workers}
-        interactive={workersFocused && !modal}
-        width={terminalWidth}
-        onExpandedChange={setWorkerBoardExpanded}
-      />
-      {modal}
-      <InputPanel
-        active={state.inputActive && !modal}
-        commands={state.commands}
-        connectionError={state.connectionError}
-        isGenerating={state.isGenerating}
-        focusedPane={focus}
-        cwd={state.status.cwd}
-        model={state.status.model}
-        contextPercent={state.status.contextPercent}
-        width={terminalWidth}
-        onSubmit={(value) => send({ type: "input", content: value })}
-        onInterrupt={() => send({ type: "interrupt" })}
-        onCopyLast={() => send({ type: "copy_last_response" })}
-      />
       <Box flexGrow={1} />
     </Box>
   );

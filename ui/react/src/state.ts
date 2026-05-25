@@ -1,5 +1,6 @@
 import type {
   CommandOption,
+  GuidedQuestion,
   InboundEnvelope,
   InboundMessage,
   ModelOption,
@@ -82,9 +83,18 @@ export interface SelectionState<T> {
   options: T[];
 }
 
+export interface QuestionSessionState {
+  questions: GuidedQuestion[];
+}
+
 export interface StreamingItem {
   id: string;
   content: string;
+}
+
+export interface TodoItem {
+  task: string;
+  status: "pending" | "in_progress" | "completed";
 }
 
 export interface AppState {
@@ -100,10 +110,12 @@ export interface AppState {
   isGenerating: boolean;
   streams: Record<string, string>;
   completedStreams: Record<string, string>;
+  todos: TodoItem[];
   modelSelect: SelectionState<ModelOption> | null;
   providerSelect: SelectionState<ProviderOption> | null;
   skillSelect: SelectionState<SkillOption> | null;
   apiKeyPrompt: { provider: string } | null;
+  questionSession: QuestionSessionState | null;
 }
 
 export const initialState: AppState = {
@@ -119,10 +131,12 @@ export const initialState: AppState = {
   isGenerating: false,
   streams: {},
   completedStreams: {},
+  todos: [],
   modelSelect: null,
   providerSelect: null,
   skillSelect: null,
   apiKeyPrompt: null,
+  questionSession: null,
 };
 
 type Action =
@@ -131,7 +145,7 @@ type Action =
   | { type: "connection_error"; error: string }
   | { type: "bridge"; message: InboundEnvelope }
   | { type: "input_sent" }
-  | { type: "selection_closed"; selection: "model" | "provider" | "skill" | "apiKey" };
+  | { type: "selection_closed"; selection: "model" | "provider" | "skill" | "apiKey" | "question" };
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -192,12 +206,13 @@ export function selectWorkerActivity(state: AppState, workerId: string): WorkerA
 
 function closeSelection(
   state: AppState,
-  selection: "model" | "provider" | "skill" | "apiKey",
+  selection: "model" | "provider" | "skill" | "apiKey" | "question",
 ): AppState {
   if (selection === "model") return { ...state, modelSelect: null };
   if (selection === "provider") return { ...state, providerSelect: null };
   if (selection === "skill") return { ...state, skillSelect: null };
-  return { ...state, apiKeyPrompt: null };
+  if (selection === "apiKey") return { ...state, apiKeyPrompt: null };
+  return { ...state, questionSession: null };
 }
 
 function applyEnvelope(state: AppState, envelope: InboundEnvelope): AppState {
@@ -322,11 +337,11 @@ function activityTitle(
   type: WorkerActivityType,
   toolName?: string,
 ): string {
-  if (type === "tool_call") return toolName ? `tool ${toolName}` : "tool call";
-  if (type === "tool_output") return toolName ? `${toolName} output` : "tool output";
+  if (type === "tool_call") return toolName ?? "tool";
+  if (type === "tool_output") return toolName ?? "tool";
   if (type === "notification") return "update";
   if (type === "status") return "status";
-  return "thinking";
+  return "";
 }
 
 function activityCountKey(type: WorkerActivityType): keyof WorkerActivityCounts | null {
@@ -377,6 +392,15 @@ function appendWorkerActivity(
   });
 }
 
+function nextWorkerActivityId(
+  workers: WorkerState[],
+  workerId: string,
+  prefix: string,
+): string {
+  const worker = workers.find((candidate) => candidate.id === workerId);
+  return `${prefix}-${workerId}-${(worker?.activityOrder.length ?? 0) + 1}`;
+}
+
 function applyInbound(state: AppState, message: InboundMessage): AppState {
   switch (message.type) {
     case "banner":
@@ -421,10 +445,14 @@ function applyInbound(state: AppState, message: InboundMessage): AppState {
       return openProviderSelect(state, message.providers);
     case "skill_select":
       return openSkillSelect(state, message.skills);
+    case "question_request":
+      return openQuestionSession(state, message.questions);
     case "api_key_request":
       return { ...state, inputActive: false, apiKeyPrompt: { provider: message.provider } };
     case "mode_switch":
       return appendModeSwitch(state, message.mode, message.note);
+    case "todo_list":
+      return { ...state, todos: message.items as TodoItem[] };
     case "clear":
       return clearTimeline(state);
     case "exit":
@@ -622,27 +650,18 @@ function updateWorkerNotification(
     lastUpdatedAt: workerTimestamp(message),
   });
 
-  return appendTranscript(
-    {
-      ...state,
-      workers: appendWorkerActivity(workers, message.workerId, {
-        id: message.id ?? `worker-note-${message.workerId}-${state.transcript.order.length + 1}`,
-        type: "notification",
-        title: `${message.workerId} ${message.status}`,
-        content: message.finalResponse ?? message.summary,
-        preview: compactPreview(message.finalResponse ?? message.summary),
-        timestamp: workerTimestamp(message),
-        collapsible: true,
-      }),
-    },
-    createTranscriptItem(
-      message.id ?? `worker-note-${message.workerId}`,
-      "worker",
-      message.finalResponse ?? message.summary,
-      `${message.workerId} ${message.status}`,
-      "worker",
-    ),
-  );
+  return {
+    ...state,
+    workers: appendWorkerActivity(workers, message.workerId, {
+      id: message.id ?? nextWorkerActivityId(workers, message.workerId, "worker-note"),
+      type: "notification",
+      title: `${message.workerId} ${message.status}`,
+      content: message.finalResponse ?? message.summary,
+      preview: compactPreview(message.finalResponse ?? message.summary),
+      timestamp: workerTimestamp(message),
+      collapsible: true,
+    }),
+  };
 }
 
 function updateWorkerStatus(
@@ -660,29 +679,18 @@ function updateWorkerStatus(
     lastUpdatedAt: workerTimestamp(message),
   });
 
-  return appendTranscript(
-    {
-      ...state,
-      workers: appendWorkerActivity(workers, message.workerId, {
-        id: message.id ?? `worker-status-${message.workerId}-${state.transcript.order.length + 1}`,
-        type: "status",
-        title: `${message.workerId} ${message.status}`,
-        content: resultText || message.status,
-        preview: compactPreview(resultText || message.status),
-        timestamp: workerTimestamp(message),
-        collapsible: true,
-      }),
-    },
-    createTranscriptItem(
-      message.id ?? `worker-status-${message.workerId}`,
-      "worker",
-      resultText || message.status,
-      `${message.workerId} ${message.status}`,
-      "worker",
-      undefined,
-      true,
-    ),
-  );
+  return {
+    ...state,
+    workers: appendWorkerActivity(workers, message.workerId, {
+      id: nextWorkerActivityId(workers, message.workerId, message.id ?? "worker-status"),
+      type: "status",
+      title: `${message.workerId} ${message.status}`,
+      content: resultText || message.status,
+      preview: compactPreview(resultText || message.status),
+      timestamp: workerTimestamp(message),
+      collapsible: true,
+    }),
+  };
 }
 
 function appendWorkerDetail(
@@ -692,7 +700,7 @@ function appendWorkerDetail(
   const type = isWorkerActivityType(message.detailType)
     ? message.detailType
     : "notification";
-  const id = message.id ?? `worker-detail-${message.workerId}-${message.detailType}-${state.transcript.order.length + 1}`;
+  const id = message.id ?? nextWorkerActivityId(state.workers, message.workerId, `worker-detail-${message.detailType}`);
 
   return {
     ...state,
@@ -750,6 +758,14 @@ function openSkillSelect(state: AppState, skills: SkillOption[]): AppState {
   };
 }
 
+function openQuestionSession(state: AppState, questions: GuidedQuestion[]): AppState {
+  return {
+    ...state,
+    inputActive: false,
+    questionSession: { questions },
+  };
+}
+
 function appendModeSwitch(state: AppState, mode: string, note?: string): AppState {
   return appendTranscript(
     state,
@@ -770,6 +786,7 @@ function clearTimeline(state: AppState): AppState {
     streams: {},
     completedStreams: {},
     workers: [],
+    todos: [],
     isGenerating: false,
   };
 }

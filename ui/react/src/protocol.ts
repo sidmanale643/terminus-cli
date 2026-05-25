@@ -22,6 +22,13 @@ export interface SkillOption {
   name: string;
   description: string;
   trigger?: string;
+  loaded?: boolean;
+}
+
+export interface GuidedQuestion {
+  text: string;
+  options: [string, string, string];
+  allowMultiple: boolean;
 }
 
 export interface BackendEventMetadata {
@@ -53,7 +60,9 @@ export type InboundMessage = BackendEventMetadata & (
   | { type: "provider_select"; providers: ProviderOption[] }
   | { type: "api_key_request"; provider: string }
   | { type: "skill_select"; skills: SkillOption[] }
+  | { type: "question_request"; questions: GuidedQuestion[] }
   | { type: "mode_switch"; mode: string; note?: string }
+  | { type: "todo_list"; items: { task: string; status: string }[] }
   | { type: "clear" }
   | { type: "exit" }
 );
@@ -73,7 +82,8 @@ export type OutboundMessage =
   | { type: "model_selected"; name: string | null }
   | { type: "provider_selected"; name: string | null }
   | { type: "api_key_submitted"; key: string }
-  | { type: "skill_selected"; name: string | null };
+  | { type: "skill_selected"; name: string | null }
+  | { type: "question_answer"; content: string };
 
 export function parseJsonLines(buffer: string): {
   messages: InboundEnvelope[];
