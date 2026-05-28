@@ -48,7 +48,7 @@ export interface WorkerPaneLayout {
 const MIN_TRANSCRIPT_WIDTH = 60;
 export const TRANSCRIPT_CHROME_ROWS = 2;
 const MIN_TRANSCRIPT_CONTENT_ROWS = 1;
-const BANNER_LINES = 8;
+const BANNER_LINES = 9;
 const WELCOME_LINES = 5;
 const COMPOSER_LINES = 6;
 const GENERATION_LINES = 1;

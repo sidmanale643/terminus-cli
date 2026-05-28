@@ -71,10 +71,11 @@ const COLORS = {
   danger: "#ff7b72",
   success: "#7ee787",
   info: "#79c0ff",
+  bannerGradient: ["#79c0ff", "#6bb3ff", "#58a6ff", "#4c9aff", "#3d8bfd", "#2d7af7"],
 };
 
 const WIDE_BANNER_MIN_WIDTH = 78;
-const WIDE_BANNER_ROWS = 8;
+const WIDE_BANNER_ROWS = 9;
 const COMPACT_BANNER_ROWS = 4;
 const WELCOME_ROWS = 6;
 const COMPACT_LABEL_LENGTH = 18;
@@ -1264,12 +1265,16 @@ function WorkerPanes({
 
 function SectionCard({
   title,
+  titleColor,
   children,
   width,
+  marginBottom,
 }: {
   title: string;
+  titleColor?: string;
   children: React.ReactNode;
   width?: number;
+  marginBottom?: number;
 }) {
   return (
     <Box
@@ -1277,9 +1282,12 @@ function SectionCard({
       borderStyle="round"
       borderColor={COLORS.borderMuted}
       paddingX={1}
+      paddingTop={0}
+      paddingBottom={0}
       width={width}
+      marginBottom={marginBottom}
     >
-      <Text color={COLORS.accent} wrap="truncate">{title}</Text>
+      <Text color={titleColor ?? COLORS.accent} bold wrap="truncate">{title}</Text>
       {children}
     </Box>
   );
@@ -1316,23 +1324,30 @@ function WelcomePanel({
   const contextCommands = formatCommandGroup(["/context", "/compact", "/help"], availableCommands, innerWidth - 9);
 
   return (
-    <SectionCard title="Workspace ready" width={panelWidth}>
+    <SectionCard title="Workspace ready" titleColor={COLORS.success} width={panelWidth} marginBottom={1}>
       <Text wrap="truncate">
-        <Text color={COLORS.muted}>cwd </Text>
-        <Text color={COLORS.text}>{workspaceLabel}</Text>
+        <Text color={COLORS.muted}>cwd   </Text>
+        <Text color={COLORS.text} bold>{workspaceLabel}</Text>
       </Text>
+      <Box marginTop={1}>
+        <Text wrap="truncate">
+          <Text color={COLORS.info}>plan  </Text>
+          <Text color={COLORS.dim}>{planningCommands || "type a task directly"}</Text>
+        </Text>
+      </Box>
       <Text wrap="truncate">
-        <Text color={COLORS.accent}>Plan </Text>
-        <Text color={COLORS.dim}>{planningCommands || "type a task directly"}</Text>
-      </Text>
-      <Text wrap="truncate">
-        <Text color={COLORS.accent}>Setup </Text>
+        <Text color={COLORS.accent}>setup </Text>
         <Text color={COLORS.dim}>{setupCommands || "provider and model configured"}</Text>
       </Text>
       <Text wrap="truncate">
-        <Text color={COLORS.accent}>State </Text>
+        <Text color={COLORS.muted}>state </Text>
         <Text color={COLORS.dim}>{contextCommands || "conversation controls unavailable"}</Text>
       </Text>
+      <Box marginTop={1}>
+        <Text color={COLORS.dim} italic wrap="truncate">
+          {compactLine("Press F1 for commands, or type /help", innerWidth)}
+        </Text>
+      </Box>
     </SectionCard>
   );
 }
@@ -1346,7 +1361,7 @@ function Banner({ logo, subtitle, width }: { logo: string[]; subtitle?: string; 
   if (!useWideBanner) {
     const innerWidth = Math.max(18, width - 4);
     return (
-      <Box flexDirection="column" marginBottom={1}>
+      <Box flexDirection="column" marginBottom={2}>
         <Text color={COLORS.accent} bold wrap="truncate">
           {compactLine("TERMINUS", innerWidth)}
         </Text>
@@ -1361,14 +1376,17 @@ function Banner({ logo, subtitle, width }: { logo: string[]; subtitle?: string; 
   }
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      {logo.map((line, index) => (
-        <Text key={`${line}-${index}`} color={index === 0 ? COLORS.info : COLORS.accent}>
-          {truncatePreservingWhitespace(line, width)}
-        </Text>
-      ))}
+    <Box flexDirection="column" marginBottom={2}>
+      {logo.map((line, index) => {
+        const gradientColor = COLORS.bannerGradient[index % COLORS.bannerGradient.length];
+        return (
+          <Text key={`${line}-${index}`} color={gradientColor}>
+            {truncatePreservingWhitespace(line, width)}
+          </Text>
+        );
+      })}
       {tagline ? (
-        <Text color={COLORS.dim} wrap="truncate">
+        <Text color={COLORS.accent} bold wrap="truncate">
           {compactLine(tagline, Math.max(1, width))}
         </Text>
       ) : null}
