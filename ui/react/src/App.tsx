@@ -71,13 +71,18 @@ const COLORS = {
   danger: "#ff7b72",
   success: "#7ee787",
   info: "#79c0ff",
+  cyan: "#39d0d8",
+  cyanSoft: "#1a9e96",
+  teal: "#2dd4bf",
   bannerGradient: ["#79c0ff", "#6bb3ff", "#58a6ff", "#4c9aff", "#3d8bfd", "#2d7af7"],
+  glow: "#58a6ff",
 };
 
 const WIDE_BANNER_MIN_WIDTH = 78;
 const WIDE_BANNER_ROWS = 9;
 const COMPACT_BANNER_ROWS = 4;
-const WELCOME_ROWS = 6;
+const HERO_SECTION_ROWS = 0;
+const STATUS_CARDS_ROWS = 5;
 const COMPACT_LABEL_LENGTH = 18;
 const COMPACT_BODY_LENGTH = 52;
 const TRANSCRIPT_CONTENT_COLUMN = 3;
@@ -109,6 +114,11 @@ function shouldUseWideBanner(width: number): boolean {
 export function calculateBannerRows(width: number, hasBanner: boolean): number {
   if (!hasBanner) return 0;
   return shouldUseWideBanner(width) ? WIDE_BANNER_ROWS : COMPACT_BANNER_ROWS;
+}
+
+export function calculateIntroRows(width: number, hasBanner: boolean): number {
+  const bannerRows = calculateBannerRows(width, hasBanner);
+  return bannerRows + HERO_SECTION_ROWS + STATUS_CARDS_ROWS;
 }
 
 function formatPercent(value: number): string {
@@ -449,21 +459,13 @@ function CommandSuggestions({
   selectedIndex: number;
 }) {
   const filtered = commands.filter((command) => command.name.startsWith(query));
-  if (filtered.length === 0) {
-    return (
-      <Box marginLeft={2}>
-        <Text color={COLORS.dim}>No matching commands</Text>
-      </Box>
-    );
-  }
-
   return (
     <Box flexDirection="column" marginLeft={2}>
       {filtered.slice(0, 8).map((command, index) => (
         <Text
           key={command.name}
           color={index === selectedIndex ? COLORS.background : COLORS.dim}
-          backgroundColor={index === selectedIndex ? COLORS.accent : undefined}
+          backgroundColor={index === selectedIndex ? COLORS.cyan : undefined}
         >
           {`${index === selectedIndex ? ">" : " "} ${command.name.padEnd(14)} ${command.description}`}
         </Text>
@@ -510,7 +512,7 @@ function InputPanel({
   const footerLeft = truncateMiddle(homeCompressed(cwd), Math.max(12, width - footerRight.length - 5));
   const footerGap = Math.max(1, width - footerLeft.length - footerRight.length - 4);
   const cursorGlyph = active ? "▌" : "▏";
-  const cursorColor = active ? COLORS.accent : COLORS.dim;
+  const cursorColor = active ? COLORS.cyan : COLORS.dim;
 
   useEffect(() => {
     if (!active) return;
@@ -576,18 +578,20 @@ function InputPanel({
       {isGenerating ? (
         <Box>
           <Spinner active={true} />
-          <Text color={COLORS.dim}> Generating response  Ctrl+C interrupt</Text>
+          <Text color={COLORS.dim}> Generating response  </Text>
+          <Text color={COLORS.cyan}>Ctrl+C</Text>
+          <Text color={COLORS.dim}> interrupt</Text>
         </Box>
       ) : null}
-      <Box flexDirection="column" borderStyle="round" borderColor={COLORS.border} paddingX={1} paddingY={1}>
+      <Box flexDirection="column" borderStyle="round" borderColor={active ? COLORS.cyanSoft : COLORS.border} paddingX={1} paddingY={0}>
         {connectionError ? <Text color={COLORS.danger}>{connectionError}</Text> : null}
         <Box>
-          <Text color={COLORS.accent}>{"> "}</Text>
+          <Text color={COLORS.cyan}>{"> "}</Text>
           <Text color={COLORS.text}>{value.slice(0, cursor)}</Text>
           <Text color={cursorColor}>{cursorGlyph}</Text>
           <Text color={COLORS.text}>{value.slice(cursor)}</Text>
         </Box>
-        <Box marginTop={1}>
+        <Box marginTop={0}>
           <Text color={COLORS.dim}>{footerLeft}</Text>
           <Text>{" ".repeat(footerGap)}</Text>
           <Text color={COLORS.accent}>{formatPercent(contextPercent)}</Text>
@@ -599,9 +603,13 @@ function InputPanel({
         ) : null}
       </Box>
       {active ? (
-        <Text color={COLORS.dim}>
-          Enter submit  Ctrl+C interrupt
-        </Text>
+        <Box justifyContent="space-between" paddingLeft={1}>
+          <Text color={COLORS.dim}>
+            <Text color={COLORS.cyan}>Enter</Text> submit{"  "}
+            <Text color={COLORS.cyan}>Ctrl+C</Text> interrupt{"  "}
+            <Text color={COLORS.cyan}>Tab</Text> autocomplete
+          </Text>
+        </Box>
       ) : (
         <Text color={COLORS.dim}>Ready</Text>
       )}
@@ -1293,62 +1301,58 @@ function SectionCard({
   );
 }
 
-function commandAvailable(command: string, availableCommands: Set<string>): boolean {
-  return availableCommands.has(command);
-}
-
-function formatCommandGroup(
-  commands: string[],
-  availableCommands: Set<string>,
-  width: number,
-): string {
-  const visibleCommands = commands.filter((command) => commandAvailable(command, availableCommands));
-  return compactLine(visibleCommands.join("  "), width);
-}
-
-function WelcomePanel({
+function StatusCards({
   cwd,
   commands,
+  transcriptItems,
   width,
 }: {
   cwd: string;
   commands: CommandOption[];
+  transcriptItems: TranscriptItem[];
   width: number;
 }) {
   const availableCommands = new Set(commands.map((c) => c.name));
-  const panelWidth = Math.max(1, width);
-  const innerWidth = Math.max(1, panelWidth - 4);
+  const innerWidth = Math.max(1, width - 4);
   const workspaceLabel = truncateMiddle(homeCompressed(cwd), Math.max(18, innerWidth - 12));
-  const planningCommands = formatCommandGroup(["/plan", "/mode", "/skills"], availableCommands, innerWidth - 9);
-  const setupCommands = formatCommandGroup(["/models", "/connect"], availableCommands, innerWidth - 7);
-  const contextCommands = formatCommandGroup(["/context", "/compact", "/help"], availableCommands, innerWidth - 9);
+
+  const shortcutCommands = ["/plan", "/connect", "/compact", "/models"];
+  const visibleShortcuts = shortcutCommands.filter((cmd) => availableCommands.has(cmd));
+
+  const toolCommands = ["/mcp", "/skills", "/mode", "/init"];
+  const visibleTools = toolCommands.filter((cmd) => availableCommands.has(cmd));
+
+  const recentCommands = transcriptItems
+    .filter((item) => item.kind === "response" || item.kind === "error")
+    .slice(-3)
+    .map((item) => item.title ?? item.kind);
+
+  const cardWidth = Math.max(1, Math.floor((innerWidth - 2) / 2));
 
   return (
-    <SectionCard title="Workspace ready" titleColor={COLORS.success} width={panelWidth} marginBottom={1}>
-      <Text wrap="truncate">
-        <Text color={COLORS.muted}>cwd   </Text>
-        <Text color={COLORS.text} bold>{workspaceLabel}</Text>
-      </Text>
-      <Box marginTop={1}>
+    <Box flexDirection="row" flexWrap="wrap" marginBottom={1} paddingLeft={1}>
+      <SectionCard title="Workspace" titleColor={COLORS.cyan} width={cardWidth} marginBottom={1}>
         <Text wrap="truncate">
-          <Text color={COLORS.info}>plan  </Text>
-          <Text color={COLORS.dim}>{planningCommands || "type a task directly"}</Text>
+          <Text color={COLORS.dim}>cwd </Text>
+          <Text color={COLORS.text} bold>{workspaceLabel}</Text>
         </Text>
-      </Box>
-      <Text wrap="truncate">
-        <Text color={COLORS.accent}>setup </Text>
-        <Text color={COLORS.dim}>{setupCommands || "provider and model configured"}</Text>
-      </Text>
-      <Text wrap="truncate">
-        <Text color={COLORS.muted}>state </Text>
-        <Text color={COLORS.dim}>{contextCommands || "conversation controls unavailable"}</Text>
-      </Text>
-      <Box marginTop={1}>
-        <Text color={COLORS.dim} italic wrap="truncate">
-          {compactLine("Press F1 for commands, or type /help", innerWidth)}
+      </SectionCard>
+      <SectionCard title="Shortcuts" titleColor={COLORS.teal} width={cardWidth} marginBottom={1}>
+        <Text wrap="truncate">
+          <Text color={COLORS.dim}>{visibleShortcuts.join("  ") || "type a command"}</Text>
         </Text>
-      </Box>
-    </SectionCard>
+      </SectionCard>
+      <SectionCard title="Tools" titleColor={COLORS.info} width={cardWidth} marginBottom={1}>
+        <Text wrap="truncate">
+          <Text color={COLORS.dim}>{visibleTools.join("  ") || "F1 for commands"}</Text>
+        </Text>
+      </SectionCard>
+      <SectionCard title="Recent" titleColor={COLORS.muted} width={cardWidth} marginBottom={1}>
+        <Text wrap="truncate">
+          <Text color={COLORS.dim}>{recentCommands.join(", ") || "no recent activity"}</Text>
+        </Text>
+      </SectionCard>
+    </Box>
   );
 }
 
@@ -1361,22 +1365,19 @@ function Banner({ logo, subtitle, width }: { logo: string[]; subtitle?: string; 
   if (!useWideBanner) {
     const innerWidth = Math.max(18, width - 4);
     return (
-      <Box flexDirection="column" marginBottom={2}>
-        <Text color={COLORS.accent} bold wrap="truncate">
+      <Box flexDirection="column" marginBottom={1}>
+        <Text color={COLORS.cyan} bold wrap="truncate">
           {compactLine("TERMINUS", innerWidth)}
         </Text>
         <Text color={COLORS.dim} wrap="truncate">
           {compactLine("agentic engineering in your terminal", innerWidth)}
-        </Text>
-        <Text color={COLORS.dim} wrap="truncate">
-          {compactLine(tagline ?? "", innerWidth)}
         </Text>
       </Box>
     );
   }
 
   return (
-    <Box flexDirection="column" marginBottom={2}>
+    <Box flexDirection="column" marginBottom={1}>
       {logo.map((line, index) => {
         const gradientColor = COLORS.bannerGradient[index % COLORS.bannerGradient.length];
         return (
@@ -1385,13 +1386,12 @@ function Banner({ logo, subtitle, width }: { logo: string[]; subtitle?: string; 
           </Text>
         );
       })}
-      {tagline ? (
-        <Text color={COLORS.accent} bold wrap="truncate">
-          {compactLine(tagline, Math.max(1, width))}
-        </Text>
-      ) : null}
     </Box>
   );
+}
+
+function HeroSection({ tagline, width }: { tagline?: string; width: number }) {
+  return null;
 }
 
 function SelectionModal<T extends { name: string; description?: string; loaded?: boolean }>({
@@ -2052,8 +2052,10 @@ export default function App() {
   const bannerRows = state.showIntro
     ? calculateBannerRows(terminalWidth, Boolean(state.banner))
     : 0;
-  const welcomeRows = state.showIntro ? WELCOME_ROWS : 0;
-  const transcriptTop = 1 + bannerRows + welcomeRows;
+  const introRows = state.showIntro
+    ? calculateIntroRows(terminalWidth, Boolean(state.banner))
+    : 0;
+  const transcriptTop = 1 + introRows;
   const transcriptLeft = 1;
   const transcriptItems = selectTranscriptItems(state);
   const streams = selectStreamingItems(state);
@@ -2072,8 +2074,8 @@ export default function App() {
   });
   const mainContentRows = calculateMainContentRows({
     terminalHeight,
-    bannerRows,
-    welcomeRows,
+    bannerRows: introRows,
+    welcomeRows: 0,
     todoPanelRows: todoPanelHeight,
     isGenerating: state.isGenerating,
   });
@@ -2233,15 +2235,18 @@ export default function App() {
 
   return (
     <Box flexDirection="column" width={terminalWidth} height={terminalHeight}>
-      {state.showIntro && state.banner ? (
-        <Banner logo={state.banner.logo} subtitle={state.banner.subtitle} width={terminalWidth} />
-      ) : null}
       {state.showIntro ? (
-        <WelcomePanel
-          cwd={state.status.cwd}
-          commands={state.commands}
-          width={terminalWidth}
-        />
+        <>
+          {state.banner ? (
+            <Banner logo={state.banner.logo} subtitle={state.banner.subtitle} width={terminalWidth} />
+          ) : null}
+          <StatusCards
+            cwd={state.status.cwd}
+            commands={state.commands}
+            transcriptItems={transcriptItems}
+            width={terminalWidth}
+          />
+        </>
       ) : null}
       {modalActive ? (
         <Box flexGrow={1} justifyContent="center" paddingX={1}>

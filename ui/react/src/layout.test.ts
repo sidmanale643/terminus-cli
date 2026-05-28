@@ -18,7 +18,7 @@ assert.equal(
     hasTodos: false,
     isGenerating: false,
   }),
-  12,
+  9,
 );
 
 assert.equal(
