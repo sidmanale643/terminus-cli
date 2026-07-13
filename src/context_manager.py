@@ -21,15 +21,31 @@ class ContextManager:
     def add_message(self, role: str, content: str, **kwargs) -> Dict[str, Any]:
         message = {"role": role, "content": content, **kwargs}
         self.context.append(message)
-        self.update_context_size()
+        size = len(content or "")
+        self.message_context_size.append(size)
+        self.context_size += size
         return message
+
+    def replace_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Replace the context in one pass, for restores and other bulk operations."""
+        self.context = list(messages)
+        self.update_context_size()
 
     def set_system_message(self, content: str):
         if self.context and self.context[0].get("role") == "system":
+            previous_size = self.message_context_size[0] if self.message_context_size else 0
             self.context[0]["content"] = content
+            size = len(content or "")
+            if self.message_context_size:
+                self.message_context_size[0] = size
+                self.context_size += size - previous_size
+            else:
+                self.update_context_size()
         else:
             self.context.insert(0, {"role": "system", "content": content})
-        self.update_context_size()
+            size = len(content or "")
+            self.message_context_size.insert(0, size)
+            self.context_size += size
 
     def update_context_size(self):
         sizes = []

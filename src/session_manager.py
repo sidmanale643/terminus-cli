@@ -77,6 +77,18 @@ class SessionHistory:
         self.session_history.commit()
         return self.sh_cursor.lastrowid
 
+    def insert_many_to_session_history(self, messages):
+        """Insert a sequence of (role, content) pairs in one transaction."""
+        rows = [(self._get_timestamp(), role, content) for role, content in messages]
+        if not rows:
+            return 0
+        self.sh_cursor.executemany(
+            "INSERT INTO session_history (timestamp, role, content) VALUES (?, ?, ?)",
+            rows,
+        )
+        self.session_history.commit()
+        return len(rows)
+
     def retrieve_chat_history(self, name=None, chat_id=None, limit=None):
         query = "SELECT id, name, timestamp, chat_history FROM chat_history"
         params = []

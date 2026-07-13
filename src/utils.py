@@ -1,15 +1,6 @@
-from openai import OpenAI
-from src.tools.tool_registry import ToolRegistry
-from pydantic import BaseModel
 from typing import Any, List, Dict
-from groq import Groq
-from types import SimpleNamespace
+import json
 import os
-
-class Response(BaseModel):
-    content: str
-    tool_calls: Any
-    reasoning: str | None = None
 
 
 def parse_tool_calls(tool_calls):
@@ -29,138 +20,6 @@ def parse_tool_calls(tool_calls):
     return []
 
 
-def merge_stream_tool_calls(existing: list[Any] | None, delta_tool_calls: Any) -> list[Any]:
-    """
-    Merge streaming tool call deltas into a stable list of tool-call-like objects.
-
-    OpenAI-compatible providers often stream tool calls in fragments keyed by
-    ``index`` with partial ``id``, ``function.name``, and ``function.arguments``.
-    This helper reconstructs the full calls so the agent loop can execute the
-    tool after streaming completes.
-    """
-    merged = list(existing or [])
-    incoming = parse_tool_calls(delta_tool_calls)
-
-    for delta in incoming:
-        index = getattr(delta, "index", None)
-        if index is None:
-            index = len(merged)
-
-        while len(merged) <= index:
-            merged.append(
-                SimpleNamespace(
-                    id="",
-                    type="function",
-                    function=SimpleNamespace(name="", arguments=""),
-                )
-            )
-
-        current = merged[index]
-
-        delta_id = getattr(delta, "id", None)
-        if delta_id:
-            current.id = delta_id
-
-        delta_type = getattr(delta, "type", None)
-        if delta_type:
-            current.type = delta_type
-
-        delta_function = getattr(delta, "function", None)
-        if delta_function is None and isinstance(delta, dict):
-            delta_function = delta.get("function")
-
-        if delta_function is None:
-            continue
-
-        delta_name = getattr(delta_function, "name", None)
-        if delta_name is None and isinstance(delta_function, dict):
-            delta_name = delta_function.get("name")
-        if delta_name:
-            current.function.name = delta_name
-
-        delta_arguments = getattr(delta_function, "arguments", None)
-        if delta_arguments is None and isinstance(delta_function, dict):
-            delta_arguments = delta_function.get("arguments")
-        if delta_arguments:
-            current.function.arguments += delta_arguments
-
-    return merged
-
-
-def call_llm(messages):
-    api_key = os.getenv("OPEN_ROUTER_API_KEY")
-    if not api_key:
-        raise ValueError("OPEN_ROUTER_API_KEY environment variable not set")
-
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
-
-    model_name = "z-ai/glm-4.5-air:free"
-    temperature = 0.3
-
-    tool_registry = ToolRegistry()
-
-    tool_schemas = tool_registry.tool_schemas
-
-    request_params = {
-        "model": model_name,
-        "messages": messages,
-        "temperature": temperature,
-        "tool_choice": "auto",
-        "tools": tool_schemas,
-    }
-
-    response = client.chat.completions.create(**request_params)
-    choice = response.choices[0].message
-
-    content = getattr(choice, "content", "") or ""
-    tool_calls = getattr(choice, "tool_calls", None)
-    reasoning_text = getattr(choice, "reasoning", None)
-
-    return Response(content=content, tool_calls=tool_calls, reasoning=reasoning_text)
-
-
-def groq(messages: List[Dict[str, str]], reasoning: bool = False, reasoning_effort: str = "medium"):
-
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY environment variable not set")
-
-    groq_client = Groq(
-        api_key=api_key,
-    )
-    try:
-        tool_registry = ToolRegistry()
-        
-        tools = tool_registry.tool_schemas
-        # Build request params conditionally
-        request_params = {
-            "model": "moonshotai/kimi-k2-instruct-0905",
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "parallel_tool_calls": False,  # Prevent parallel tool calls to avoid formatting issues
-        }
-
-        if reasoning:
-            request_params["include_reasoning"] = True
-            request_params["reasoning_effort"] = reasoning_effort
-
-        response = groq_client.chat.completions.create(**request_params)
-
-        content = response.choices[0].message.content or ""
-        tool_calls = response.choices[0].message.tool_calls
-        reasoning_text = response.choices[0].message.reasoning or None
-
-        return Response(content=content, tool_calls=tool_calls, reasoning=reasoning_text)
-
-    except Exception as e:
-        print(f"Error in groq: {e}")
-        return Response(content="", tool_calls=None, reasoning=None)
-
-    
 def parse_file_references(user_input: str):
     """
     Parse @filename references from user input.
@@ -248,22 +107,20 @@ def process_file_references(user_input: str):
     return enriched_message, loaded_files, errors
 
 def compact(messages: List[Dict[str, Any]], llm_service, model_name: str | None = None) -> List[Dict[str, Any]]:
+    from src.prompts.compaction_prompt import get_compaction_prompt
 
     if len(messages) <= 2:
         return messages[:]
 
-    # Exclude the most recent user message so it isn't lost
-    history = "\n".join(
-        f"{m['role']}: {m['content']}" for m in messages[:-1]
-    )
+    retained_message = messages[-1] if messages[-1].get("role") == "user" else None
+    messages_to_summarize = messages[:-1] if retained_message else messages
+    history = json.dumps(messages_to_summarize, ensure_ascii=False, default=str)
 
     summarize_prompt = (
-        "<reminder>\n"
-        "You have currently exhausted your current context window limit. "
-        "Summarize all the previous details concisely, preserving key facts, "
-        "decisions, and the current task state.\n"
-        "</reminder>\n\n"
-        f"<conversation_history>\n{history}\n</conversation_history>"
+        f"{get_compaction_prompt()}\n\n"
+        "<conversation_history_json>\n"
+        f"{history}\n"
+        "</conversation_history_json>"
     )
 
     response = llm_service.generate(
@@ -278,8 +135,8 @@ def compact(messages: List[Dict[str, Any]], llm_service, model_name: str | None 
         {"role": "system", "content": summary},
     ]
 
-    if messages and messages[-1]["role"] == "user":
-        compacted.append(messages[-1])
+    if retained_message:
+        compacted.append(retained_message)
 
     return compacted
 
