@@ -11,13 +11,6 @@ from src.tools import (
     Ls,
     SubAgent,
     AskQuestion,
-    SendNotification,
-    SpawnWorker,
-    SpawnWorkersBatch,
-    StopWorker,
-    ListWorkers,
-    AwaitWorkers,
-    GetWorkerResult,
     Sandbox,
     WebSearch,
     LoadSkill,
@@ -37,7 +30,6 @@ ALL_TOOL_CLASSES = [
     Ls,
     SubAgent,
     AskQuestion,
-    SendNotification,
     Sandbox,
     WebSearch,
     LoadSkill,
@@ -58,33 +50,18 @@ PLAN_MODE_TOOL_NAMES = frozenset(
     }
 )
 
-COORDINATOR_TOOL_CLASSES = [
-    SpawnWorker,
-    SpawnWorkersBatch,
-    StopWorker,
-    ListWorkers,
-    AwaitWorkers,
-    GetWorkerResult,
-    SendNotification,
-    WebSearch,
-]
-
 
 class ToolRegistry:
     def __init__(
         self,
         exclude_tool_names=None,
-        exclude_coordinator_tool_names=None,
         cwd=None,
         mcp_manager=None,
         enable_mcp=True,
     ):
         exclude_tool_names = set(exclude_tool_names or [])
-        exclude_coordinator_tool_names = set(exclude_coordinator_tool_names or [])
         self.tool_box = {}
-        self.coordinator_tool_box = {}
         self.tool_schemas = []
-        self.coordinator_tool_schemas = []
         self.mcp_manager = (
             mcp_manager if mcp_manager is not None else McpClientManager(cwd=cwd)
         )
@@ -100,15 +77,6 @@ class ToolRegistry:
                 for name, tool in self.tool_box.items()
                 if name in PLAN_MODE_TOOL_NAMES
             }
-        )
-
-        self._register_tools(
-            self.coordinator_tool_box,
-            COORDINATOR_TOOL_CLASSES,
-            exclude_coordinator_tool_names,
-        )
-        self.coordinator_tool_schemas = self._generate_schemas(
-            self.coordinator_tool_box
         )
 
     def _register_mcp_tools(self, exclude_names=None):
@@ -177,15 +145,13 @@ class ToolRegistry:
     @staticmethod
     async def _arun(registry, tool_name, **kwargs):
         tool = registry[tool_name]
-        if hasattr(tool, "arun"):
-            return await tool.arun(**kwargs)
-        # Fallback: run sync tool in thread
-        import asyncio
-
-        return await asyncio.to_thread(tool.run, **kwargs)
+        return await tool.arun(**kwargs)
 
     def run_tool(self, tool_name, **kwargs):
         return self._run(self.tool_box, tool_name, **kwargs)
+
+    async def run_tool_async(self, tool_name, **kwargs):
+        return await self._arun(self.tool_box, tool_name, **kwargs)
 
     def run_plan_tool(self, tool_name, **kwargs):
         if tool_name not in PLAN_MODE_TOOL_NAMES:
@@ -196,12 +162,6 @@ class ToolRegistry:
             )
         return self._run(self.tool_box, tool_name, **kwargs)
 
-    def run_coordinator_tool(self, tool_name, **kwargs):
-        return self._run(self.coordinator_tool_box, tool_name, **kwargs)
-
-    async def run_tool_async(self, tool_name, **kwargs):
-        return await self._arun(self.tool_box, tool_name, **kwargs)
-
     async def run_plan_tool_async(self, tool_name, **kwargs):
         if tool_name not in PLAN_MODE_TOOL_NAMES:
             return (
@@ -210,6 +170,3 @@ class ToolRegistry:
                 "run commands, execute code, or delegate implementation work."
             )
         return await self._arun(self.tool_box, tool_name, **kwargs)
-
-    async def run_coordinator_tool_async(self, tool_name, **kwargs):
-        return await self._arun(self.coordinator_tool_box, tool_name, **kwargs)

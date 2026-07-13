@@ -6,6 +6,7 @@ from typing import ClassVar
 class Command:
     name: str
     description: str
+    usage: str = ""
     aliases: list[str] = field(default_factory=list)
 
 
@@ -13,8 +14,8 @@ class CommandRegistry:
     _commands: ClassVar[dict[str, Command]] = {}
 
     @classmethod
-    def register(cls, name: str, description: str, aliases: list[str] | None = None) -> None:
-        cmd = Command(name=name, description=description, aliases=aliases or [])
+    def register(cls, name: str, description: str, usage: str = "", aliases: list[str] | None = None) -> None:
+        cmd = Command(name=name, description=description, usage=usage or name, aliases=aliases or [])
         cls._commands[name] = cmd
         for alias in cmd.aliases:
             cls._commands[alias] = cmd
@@ -53,8 +54,8 @@ class CommandRegistry:
         return sorted(result)
 
 
-CommandRegistry.register("/help", "Display this help information")
-CommandRegistry.register("/plan", "Create an implementation plan")
+CommandRegistry.register("/help", "Show the command reference")
+CommandRegistry.register("/plan", "Create an implementation plan", "/plan <task>")
 CommandRegistry.register("/context", "View current conversation context")
 CommandRegistry.register("/history", "View recent session history")
 CommandRegistry.register("/reset", "Reset session history")
@@ -64,9 +65,8 @@ CommandRegistry.register("/clear", "Clear the console screen", aliases=["clear"]
 CommandRegistry.register("/models", "Switch AI model")
 CommandRegistry.register("/copy", "Copy last assistant response to clipboard")
 CommandRegistry.register("/skills", "List available skills")
-CommandRegistry.register("/skill", "Load a skill by name")
+CommandRegistry.register("/skill", "Choose or load a skill by name", "/skill [name]")
 CommandRegistry.register("/connect", "Select provider and configure API key")
 CommandRegistry.register("/init", "Generate or update AGENTS.md")
-CommandRegistry.register("/mode", "Switch between agent and coordinator mode")
-CommandRegistry.register("/mcp", "Show or refresh MCP server tools")
+CommandRegistry.register("/mcp", "Manage MCP servers and tools", "/mcp [status|refresh|tools]")
 CommandRegistry.register("/exit", "Exit the program", aliases=["exit", "quit", "q"])

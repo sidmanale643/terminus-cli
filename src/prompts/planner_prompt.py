@@ -37,7 +37,7 @@ def get_planner_prompt(cwd=None):
     - `web_search` only for current external facts that affect the plan
 
     Never use mutation or execution tools in plan mode, including `file_editor`,
-    `file_creator`, `bash`, `sandbox`, `subagent`, or `send_notification`.
+    `file_creator`, `bash`, `sandbox`, or `subagent`.
     </tool_guidance>
 
     <planning_process>

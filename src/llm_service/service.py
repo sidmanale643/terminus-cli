@@ -14,6 +14,7 @@ class LLMService:
 
         self.active_provider = DEFAULT_PROVIDER
         self.active_provider_name = DEFAULT_PROVIDER
+        self.provider_routing = None
 
     def register_provider(self, name: str, provider: LlmProvider ):
 
@@ -36,6 +37,9 @@ class LLMService:
         if provider_name not in self.providers:
             raise ValueError(f"Provider '{provider_name}' not registered. Available providers: {list(self.providers.keys())}")
         self.providers[provider_name].set_api_key(api_key)
+
+    def set_provider_routing(self, routing):
+        self.provider_routing = routing
 
     def _get_available_providers(self):
         return list(self.providers.keys())
@@ -64,7 +68,7 @@ class LLMService:
         provider = self._resolve_provider()
         model_name = self._resolve_model(model_name)
 
-        response = provider.generate(messages, tools, tool_choice, model_name, temperature, trace)
+        response = provider.generate(messages, tools, tool_choice, model_name, temperature, trace, provider_routing=self.provider_routing)
         return response
 
     async def agenerate(self,
@@ -79,7 +83,7 @@ class LLMService:
         provider = self._resolve_provider()
         model_name = self._resolve_model(model_name)
 
-        response = await provider.agenerate(messages, tools, tool_choice, model_name, temperature, trace)
+        response = await provider.agenerate(messages, tools, tool_choice, model_name, temperature, trace, provider_routing=self.provider_routing)
         return response
 
     def stream(self,         
@@ -93,4 +97,4 @@ class LLMService:
         provider = self._resolve_provider()
         model_name = self._resolve_model(model_name)
 
-        return provider.stream(messages, tools, tool_choice, model_name, temperature)
+        return provider.stream(messages, tools, tool_choice, model_name, temperature, provider_routing=self.provider_routing)

@@ -14,14 +14,14 @@ class OpenRouterProvider(LlmProvider):
         self.name = name
 
     def _client(self):
-        api_key = self._get_api_key("OPEN_ROUTER_API_KEY")
+        api_key = self._get_api_key("OPEN_ROUTER_API_KEY", "OPENROUTER_API_KEY")
         return OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
 
     def _async_client(self):
-        api_key = self._get_api_key("OPEN_ROUTER_API_KEY")
+        api_key = self._get_api_key("OPEN_ROUTER_API_KEY", "OPENROUTER_API_KEY")
         return AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
@@ -34,6 +34,7 @@ class OpenRouterProvider(LlmProvider):
         tool_choice: str,
         model_name: str,
         temperature: float,
+        provider_routing: Optional[List[str]] = None,
     ) -> Dict:
         request_params = {
             "model": model_name,
@@ -41,6 +42,8 @@ class OpenRouterProvider(LlmProvider):
             "temperature": temperature,
             "extra_body": {"usage": {"include": True}}
         }
+        if provider_routing:
+            request_params["extra_body"]["provider"] = {"order": provider_routing}
         if tools and len(tools) > 0:
             request_params["tools"] = tools
             request_params["tool_choice"] = tool_choice
@@ -103,6 +106,7 @@ class OpenRouterProvider(LlmProvider):
         model_name: str = "minimax/minimax-m2.5:free",
         temperature: float = 0.3,
         trace=None,
+        provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """
         Makes a request to OpenRouter API with optional reasoning capabilities.
@@ -118,24 +122,14 @@ class OpenRouterProvider(LlmProvider):
         try:
             client = self._client()
             request_params = self._build_request_params(
-                messages, tools, tool_choice, model_name, temperature
+                messages, tools, tool_choice, model_name, temperature, provider_routing
             )
             response = client.chat.completions.create(**request_params)
             return self._parse_response(response, temperature, generation)
         except Exception as e:
             if generation:
                 generation.end(level="ERROR", status_message=str(e))
-            print(f"Error in OpenRouterProvider: {type(e).__name__}: {e}")
-            return Response(
-                content="",
-                tool_calls=None,
-                stop_reason="error",
-                reasoning=None,
-                model=None,
-                temperature=None,
-                prompt_tokens=None,
-                response_tokens=None
-            )
+            raise Exception(f"Error in OpenRouterProvider: {type(e).__name__}: {e}")
 
     async def agenerate(
         self,
@@ -145,6 +139,7 @@ class OpenRouterProvider(LlmProvider):
         model_name: str = "minimax/minimax-m2.5:free",
         temperature: float = 0.3,
         trace=None,
+        provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """Async generate using AsyncOpenAI."""
         generation = None
@@ -158,24 +153,14 @@ class OpenRouterProvider(LlmProvider):
         try:
             client = self._async_client()
             request_params = self._build_request_params(
-                messages, tools, tool_choice, model_name, temperature
+                messages, tools, tool_choice, model_name, temperature, provider_routing
             )
             response = await client.chat.completions.create(**request_params)
             return self._parse_response(response, temperature, generation)
         except Exception as e:
             if generation:
                 generation.end(level="ERROR", status_message=str(e))
-            print(f"Error in OpenRouterProvider async: {type(e).__name__}: {e}")
-            return Response(
-                content="",
-                tool_calls=None,
-                stop_reason="error",
-                reasoning=None,
-                model=None,
-                temperature=None,
-                prompt_tokens=None,
-                response_tokens=None
-            )
+            raise Exception(f"Error in OpenRouterProvider async: {type(e).__name__}: {e}")
 
     def stream(
         self,
@@ -184,12 +169,13 @@ class OpenRouterProvider(LlmProvider):
         tool_choice: str = "auto",
         model_name: str = "minimax/minimax-m2.5:free",
         temperature: float = 0.3,
-        stream: bool = True
+        stream: bool = True,
+        provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """
         Stream a response from OpenRouter.
         """
-        api_key = self._get_api_key("OPEN_ROUTER_API_KEY")
+        api_key = self._get_api_key("OPEN_ROUTER_API_KEY", "OPENROUTER_API_KEY")
 
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -205,6 +191,9 @@ class OpenRouterProvider(LlmProvider):
                 "extra_body": {"usage": {"include": True},
                 "reasoning" : {"enabled": True}}
             }
+
+            if provider_routing:
+                request_params["extra_body"]["provider"] = {"order": provider_routing}
 
             # Add tools if provided
             if tools and len(tools) > 0:

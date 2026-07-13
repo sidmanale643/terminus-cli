@@ -42,6 +42,7 @@ class GroqProvider(LlmProvider):
         model_name: str = "moonshotai/kimi-k2-instruct-0905", 
         temperature: float = 0.3,
         trace=None,
+        provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """
         Makes a request to Groq API with optional reasoning capabilities.
@@ -91,13 +92,14 @@ class GroqProvider(LlmProvider):
             raise Exception(f"Error in GroqProvider: {type(e).__name__}: {e}")
 
     async def agenerate(
-        self, 
+        self,
         messages: List[Dict], 
         tools: Optional[List[Dict]] = None, 
         tool_choice: str = "auto", 
         model_name: str = "moonshotai/kimi-k2-instruct-0905", 
         temperature: float = 0.3,
         trace=None,
+        provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """Async generate using AsyncGroq."""
         generation = None
@@ -151,7 +153,8 @@ class GroqProvider(LlmProvider):
         tool_choice: str = "auto", 
         model_name: str = "moonshotai/kimi-k2-instruct-0905", 
         temperature: float = 0.3,
-        stream : bool = True
+        stream: bool = True,
+        provider_routing: Optional[List[str]] = None,
     ):
         """
         Stream a response from Groq.

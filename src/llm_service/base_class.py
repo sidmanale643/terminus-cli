@@ -11,13 +11,15 @@ class LlmProvider(ABC):
     def set_api_key(self, key: str) -> None:
         self._api_key = key
 
-    def _get_api_key(self, env_var: str) -> str:
+    def _get_api_key(self, env_var: str, *fallback_env_vars: str) -> str:
         if self._api_key:
             return self._api_key
-        api_key = os.getenv(env_var)
-        if not api_key:
-            raise ValueError(f"{env_var} environment variable not set")
-        return api_key
+        env_vars = (env_var, *fallback_env_vars)
+        for name in env_vars:
+            api_key = os.getenv(name)
+            if api_key:
+                return api_key
+        raise ValueError(f"{' or '.join(env_vars)} environment variable not set")
 
     @abstractmethod
     def generate(
@@ -28,6 +30,7 @@ class LlmProvider(ABC):
         model_name: str = "glm-4.5-air", 
         temperature: float = 0.3,
         trace=None,
+        provider_routing: Optional[List[str]] = None,
     ) -> Response:
         pass
     
@@ -42,6 +45,7 @@ class LlmProvider(ABC):
         model_name: str = "glm-4.5-air", 
         temperature: float = 0.3,
         trace=None,
+        provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """Async generate. Default implementation delegates to sync generate in a thread.
         Providers should override this for true async I/O."""

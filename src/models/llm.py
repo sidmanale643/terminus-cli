@@ -27,8 +27,17 @@ class Model(BaseModel):
     context_size : int
     input_tokens_pricing : float
     output_tokens_pricing : float
+    openrouter_provider : Optional[list] = None
 
 # ─── OpenRouter models ───────────────────────────────────────────────────────
+
+class KimK26Free(Model):
+    name: str = "moonshotai/kimi-k2.6:free"
+    provider: str = "openrouter"
+    context_size: int = 128000
+    input_tokens_pricing: float = 0
+    output_tokens_pricing: float = 0
+    openrouter_provider: list = ["crucible/fast"]
 
 class Gemma4(Model):
     name: str = "google/gemma-4-31b-it:free"
@@ -89,7 +98,7 @@ class GptOss120b(Model):
     output_tokens_pricing: float = 0
 
 available_models = [
-    Gemma4(), Glm45AirFree(), Grok4Fast(),
+    KimK26Free(), Gemma4(), Glm45AirFree(), Grok4Fast(),
     Minimax(), Sonnet_45(), DeepseekV4Flash(),
     DeepseekV4FlashFree(), GptOss120b(),
 ]

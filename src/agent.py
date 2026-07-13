@@ -1,6 +1,6 @@
 from typing import Literal, Optional
 from threading import Event
-import asyncio
+from types import SimpleNamespace
 from src.models.llm import available_models
 from src.tools.tool_registry import ToolRegistry
 import json
@@ -16,7 +16,6 @@ from src.prompts.init_prompt import get_init_prompt
 from src.observability import langfuse as lf_obs
 import os
 import re
-
 load_dotenv()
 
 MAX_ITERATIONS = 50
@@ -34,10 +33,8 @@ class Agent:
         name=None,
         system_prompt=None,
         description=None,
-        notification_callback=None,
         tool_registry=None,
         max_iterations=None,
-        execution_mode: Literal["default", "coordinator_worker"] = "default",
         use_streaming: bool = False,
     ):
         """
@@ -45,15 +42,11 @@ class Agent:
 
         Args:
             cwd: Optional working directory to use in system prompt. If None, uses os.getcwd()
-            notification_callback: Optional callable that receives dict notifications
-                when this agent uses the send_notification tool.
         """
         self.id = id
         self.cwd = cwd
         self.name = name
         self.description = description
-        self._notification_callback = notification_callback
-        self.execution_mode = execution_mode
         self.use_streaming = use_streaming
         self._subagent_counter = 0
         self.mode = "default"
@@ -247,6 +240,7 @@ class Agent:
         self.model = model.name
         service_provider = "groq" if model.provider == "groq" else "openrouter"
         self.llm_service.set_active_provider(service_provider)
+        self.llm_service.set_provider_routing(model.openrouter_provider)
         self.context_manager.model_context_size = model.context_size
         self.context_manager.model_name = model.name
         self.session_manager.set_preference("last_model", model.name)
@@ -311,14 +305,11 @@ class Agent:
         chat_history = self.session_manager.retrieve_chat_history(name=name, limit=1)
         if chat_history:
             self.clear_session()
-            for message in chat_history[0]["chat_history"]:
-                self.context_manager.add_message(
-                    message["role"], message.get("content", ""),
-                    **{k: v for k, v in message.items() if k not in ("role", "content")},
-                )
-                self.session_manager.insert_to_session_history(
-                    message["role"], json.dumps(message)
-                )
+            messages = chat_history[0]["chat_history"]
+            self.context_manager.replace_messages(messages)
+            self.session_manager.insert_many_to_session_history(
+                (message["role"], json.dumps(message)) for message in messages
+            )
             self._restore_loaded_skills_from_context()
             return True
         return False
@@ -379,8 +370,7 @@ class Agent:
             return f"running {language} code in sandbox"
 
         elif tool_name == "subagent" and "task" in tool_args:
-            task = tool_args["task"][:40]
-            return f"delegating: {task}"
+            return f"delegating: {tool_args['task'][:40]}"
 
         elif tool_name in ("todo_write", "todo_update") and "task" in tool_args:
             task = tool_args["task"][:40]  # Truncate long task names
@@ -424,16 +414,6 @@ class Agent:
         if is_plan_mode:
             return self.tool_registry.run_plan_tool(tool_name, **kwargs)
         return self.tool_registry.run_tool(tool_name, **kwargs)
-
-    async def _run_tool_for_current_turn_async(
-        self,
-        tool_name: str,
-        is_plan_mode: bool,
-        **kwargs,
-    ):
-        if is_plan_mode:
-            return await self.tool_registry.run_plan_tool_async(tool_name, **kwargs)
-        return await self.tool_registry.run_tool_async(tool_name, **kwargs)
 
     def _try_complete_ask_question_turn(
         self,
@@ -515,7 +495,7 @@ class Agent:
             user_message: The user's input message
             status_callback: Optional callback function to update status
             todo_display_callback: Optional callback function to display todo list updates
-            worker_event_callback: Optional callback function to emit worker lifecycle events
+            worker_event_callback: Optional callback function to emit subagent lifecycle events
         """
         # print(f"[RUN] Starting agent run with user message: '{user_message}'")
 
@@ -576,25 +556,70 @@ class Agent:
                     # Get tool schemas for LLM
                     tool_schemas = self._tool_schemas_for_current_mode()
 
-                    # Non-streaming response from LLM
-                    response = self.llm_service.generate(
-                        messages=self.context,
-                        tools=tool_schemas,
-                        tool_choice="auto",
-                        model_name=self.model,
-                        temperature=0.3,
-                        trace=trace,
-                    )
+                    if self.use_streaming:
+                        accumulated_content = ""
+                        streamed_tool_calls = {}
+                        for response_chunk in self.llm_service.stream(
+                            messages=self.context,
+                            tools=tool_schemas,
+                            tool_choice="auto",
+                            model_name=self.model,
+                            temperature=0.3,
+                        ):
+                            if stop_event.is_set():
+                                raise KeyboardInterrupt()
+
+                            if response_chunk.reasoning and status_callback:
+                                status_callback(response_chunk.reasoning, is_thinking=True)
+
+                            if response_chunk.content:
+                                accumulated_content += response_chunk.content
+                                if stream_callback:
+                                    stream_callback(response_chunk.content)
+
+                            for tool_call in response_chunk.tool_calls or []:
+                                index = getattr(tool_call, "index", 0)
+                                current = streamed_tool_calls.setdefault(
+                                    index,
+                                    {
+                                        "id": getattr(tool_call, "id", None),
+                                        "name": "",
+                                        "arguments": "",
+                                    },
+                                )
+                                current["id"] = getattr(tool_call, "id", None) or current["id"]
+                                function = getattr(tool_call, "function", None)
+                                if function:
+                                    current["name"] += getattr(function, "name", None) or ""
+                                    current["arguments"] += getattr(function, "arguments", None) or ""
+
+                        final_tool_calls = [
+                            SimpleNamespace(
+                                id=value["id"],
+                                function=SimpleNamespace(
+                                    name=value["name"], arguments=value["arguments"]
+                                ),
+                            )
+                            for _, value in sorted(streamed_tool_calls.items())
+                        ]
+                    else:
+                        response = self.llm_service.generate(
+                            messages=self.context,
+                            tools=tool_schemas,
+                            tool_choice="auto",
+                            model_name=self.model,
+                            temperature=0.3,
+                            trace=trace,
+                        )
+
+                        if response.reasoning and status_callback and response.reasoning.strip():
+                            status_callback(response.reasoning, is_thinking=True)
+
+                        accumulated_content = response.content or ""
+                        final_tool_calls = response.tool_calls or []
 
                     if stop_event.is_set():
                         raise KeyboardInterrupt()
-
-                    if response.reasoning:
-                        if status_callback and response.reasoning.strip():
-                            status_callback(response.reasoning, is_thinking=True)
-
-                    accumulated_content = response.content or ""
-                    final_tool_calls = response.tool_calls or []
 
                     # print("[LLM] LLM response received.")
                 except Exception as e:
@@ -672,93 +697,67 @@ class Agent:
                             if tool_call.function.name == "subagent" and not is_plan_mode:
                                 self._subagent_counter += 1
                                 worker_id = f"subagent-{self._subagent_counter}"
-                                task_description = tool_args.get("task", "")
-
                                 if worker_event_callback:
                                     worker_event_callback(
                                         "worker_spawned",
                                         {
                                             "worker_id": worker_id,
                                             "name": worker_id,
-                                            "description": task_description,
+                                            "description": tool_args.get("task", ""),
                                             "role": "subagent",
                                         },
                                     )
 
-                                def _make_wrapped_callback(wid, orig_cb, we_cb):
-                                    def _wrapped(message, is_thinking=False, **kwargs):
-                                        if orig_cb and not we_cb:
-                                            orig_cb(message, is_thinking=is_thinking, **kwargs)
-                                        if we_cb:
-                                            if is_thinking:
-                                                we_cb(
-                                                    "worker_detail",
-                                                    {
-                                                        "worker_id": wid,
-                                                        "detail_type": "thinking",
-                                                        "content": message,
-                                                        "timestamp": time.time(),
-                                                    },
-                                                )
-                                            else:
-                                                we_cb(
-                                                    "worker_notification",
-                                                    {
-                                                        "worker_id": wid,
-                                                        "status": "running",
-                                                        "summary": message,
-                                                        "timestamp": time.time(),
-                                                    },
-                                                )
-                                    return _wrapped
+                                def subagent_status(message, is_thinking=False, **kwargs):
+                                    if not worker_event_callback:
+                                        if status_callback:
+                                            status_callback(message, is_thinking=is_thinking, **kwargs)
+                                        return
+                                    worker_event_callback(
+                                        "worker_detail" if is_thinking else "worker_notification",
+                                        {
+                                            "worker_id": worker_id,
+                                            "detail_type": "thinking" if is_thinking else None,
+                                            "content": message,
+                                            "status": "running",
+                                            "summary": message,
+                                            "timestamp": time.time(),
+                                        },
+                                    )
 
-                                def _make_wrapped_tool_call_callback(wid, orig_cb, we_cb):
-                                    def _wrapped(tool_name, label, args):
-                                        if orig_cb and not we_cb:
-                                            orig_cb(tool_name, label, args)
-                                        if we_cb:
-                                            we_cb(
-                                                "worker_detail",
-                                                {
-                                                    "worker_id": wid,
-                                                    "detail_type": "tool_call",
-                                                    "content": label,
-                                                    "tool_name": tool_name,
-                                                    "args": args,
-                                                    "timestamp": time.time(),
-                                                },
-                                            )
-                                    return _wrapped
+                                def subagent_tool_call(tool_name, label, args):
+                                    if worker_event_callback:
+                                        worker_event_callback(
+                                            "worker_detail",
+                                            {
+                                                "worker_id": worker_id,
+                                                "detail_type": "tool_call",
+                                                "content": label,
+                                                "tool_name": tool_name,
+                                                "args": args,
+                                                "timestamp": time.time(),
+                                            },
+                                        )
 
-                                def _make_wrapped_tool_output_callback(wid, we_cb):
-                                    def _wrapped(tool_name, output):
-                                        if we_cb:
-                                            we_cb(
-                                                "worker_detail",
-                                                {
-                                                    "worker_id": wid,
-                                                    "detail_type": "tool_output",
-                                                    "content": str(output),
-                                                    "tool_name": tool_name,
-                                                    "timestamp": time.time(),
-                                                },
-                                            )
-                                    return _wrapped
+                                def subagent_tool_output(tool_name, output):
+                                    if worker_event_callback:
+                                        worker_event_callback(
+                                            "worker_detail",
+                                            {
+                                                "worker_id": worker_id,
+                                                "detail_type": "tool_output",
+                                                "content": str(output),
+                                                "tool_name": tool_name,
+                                                "timestamp": time.time(),
+                                            },
+                                        )
 
-                                tool_args["_status_callback"] = _make_wrapped_callback(
-                                    worker_id, status_callback, worker_event_callback
+                                tool_args.update(
+                                    _status_callback=subagent_status,
+                                    _tool_call_callback=subagent_tool_call,
+                                    _tool_output_callback=subagent_tool_output,
+                                    _stop_event=stop_event,
                                 )
-                                tool_args["_tool_call_callback"] = _make_wrapped_tool_call_callback(
-                                    worker_id, tool_call_callback, worker_event_callback
-                                )
-                                tool_args["_tool_output_callback"] = _make_wrapped_tool_output_callback(
-                                    worker_id, worker_event_callback
-                                )
-                                tool_args["_stop_event"] = stop_event
-
-                            if tool_call.function.name == "send_notification" and not is_plan_mode:
-                                tool_args["_notification_callback"] = self._notification_callback
-                                tool_args["_agent_id"] = self.id
 
                             if tool_call.function.name == "load_skill":
                                 tool_args["_agent"] = self
@@ -772,6 +771,17 @@ class Agent:
 
                             if tool_output_callback:
                                 tool_output_callback(tool_call.function.name, tool_output)
+
+                            if worker_id and worker_event_callback:
+                                worker_event_callback(
+                                    "worker_status",
+                                    {
+                                        "worker_id": worker_id,
+                                        "status": "completed",
+                                        "result": str(tool_output),
+                                        "timestamp": time.time(),
+                                    },
+                                )
 
                             if tool_span:
                                 try:
@@ -794,18 +804,6 @@ class Agent:
                                 except (json.JSONDecodeError, KeyError):
                                     pass  # Silently fail if todo output is not in expected format
 
-                            # Emit worker_status for completed subagent
-                            if worker_id and worker_event_callback:
-                                worker_event_callback(
-                                    "worker_status",
-                                    {
-                                        "worker_id": worker_id,
-                                        "status": "completed",
-                                        "result": str(tool_output),
-                                        "timestamp": time.time(),
-                                    },
-                                )
-
                             tool_results.append((tool_call, tool_output, False))
                         except Exception as e:
                             # print(f"[ERROR] Tool execution failed: {e}")
@@ -819,7 +817,6 @@ class Agent:
                                         file=sys.stderr,
                                     )
 
-                            # Emit worker_status for failed subagent
                             if worker_id and worker_event_callback:
                                 worker_event_callback(
                                     "worker_status",
@@ -886,335 +883,10 @@ class Agent:
                         }
                     )
                 except Exception as le:
-                    print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
-
-            return "Max iterations reached. Process terminated."
-        finally:
-            if trace:
-                try:
-                    lf_obs.flush()
-                except Exception as le:
-                    print(f"[Langfuse] Failed to flush trace: {le}", file=sys.stderr)
-
-    async def arun(
-        self,
-        user_message,
-        status_callback=None,
-        todo_display_callback=None,
-        tool_call_callback=None,
-        tool_output_callback=None,
-        stop_event=None,
-        worker_event_callback=None,
-    ):
-        """
-        Async version of run(). Executes tool calls concurrently.
-        """
-        stop_event = stop_event or asyncio.Event()
-
-        if stop_event.is_set():
-            raise KeyboardInterrupt()
-
-        is_plan_mode = user_message.strip().startswith("/plan")
-        if is_plan_mode:
-            self.set_mode(name="plan")
-            task = user_message.replace("/plan", "", 1).strip()
-            user_message = f"Plan this feature {task}"
-            if status_callback:
-                status_callback("switched to plan mode", is_thinking=False)
-
-        if not self.context:
-            self.add_system_message()
-
-        self.add_user_message(user_message)
-        self.update_context_size()
-        self.iteration = 0
-
-        lf_client = lf_obs.get_langfuse_client()
-        trace = None
-        if lf_client:
-            try:
-                trace = lf_client.trace(
-                    name="agent-run-async",
-                    input={"user_message": user_message, "mode": self.mode},
-                    session_id=self.session_manager.get_session_id(),
-                    metadata={
-                        "model": self.model,
-                        "provider": self.llm_service.active_provider_name,
-                        "max_iterations": self.max_iterations,
-                    },
-                )
-            except Exception as e:
-                print(f"[Langfuse] Failed to create trace: {e}", file=sys.stderr)
-
-        try:
-            while self.iteration < self.max_iterations:
-                if stop_event.is_set():
-                    raise KeyboardInterrupt()
-
-                try:
-                    self._maybe_compact_context(status_callback=status_callback)
-                    tool_schemas = self._tool_schemas_for_current_mode()
-
-                    response = await self.llm_service.agenerate(
-                        messages=self.context,
-                        tools=tool_schemas,
-                        tool_choice="auto",
-                        model_name=self.model,
-                        temperature=0.3,
-                        trace=trace,
+                    print(
+                        f"[Langfuse] Failed to update trace: {le}",
+                        file=sys.stderr,
                     )
-
-                    if stop_event.is_set():
-                        raise KeyboardInterrupt()
-
-                    if response.reasoning:
-                        if status_callback and response.reasoning.strip():
-                            status_callback(response.reasoning, is_thinking=True)
-
-                    accumulated_content = response.content or ""
-                    final_tool_calls = response.tool_calls or []
-                except Exception as e:
-                    if trace:
-                        try:
-                            trace.update(output={"error": str(e)})
-                        except Exception as le:
-                            print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
-                    return f"Error occurred while calling LLM due to {e}"
-
-                if final_tool_calls and len(final_tool_calls) > 0:
-                    parsed_calls = []
-                    for tool_call in final_tool_calls:
-                        try:
-                            tool_args = json.loads(tool_call.function.arguments)
-                            parsed_calls.append((tool_call, tool_args))
-                        except json.JSONDecodeError:
-                            if status_callback:
-                                status_callback(f"skipped malformed tool call: {tool_call.function.name}", is_thinking=False)
-                            continue
-
-                    ask_question_result = self._try_complete_ask_question_turn(
-                        parsed_calls,
-                        final_tool_calls,
-                        is_plan_mode,
-                        tool_call_callback=tool_call_callback,
-                        status_callback=status_callback,
-                        trace=trace,
-                    )
-                    if ask_question_result is not None:
-                        return ask_question_result
-
-                    for tool_call, tool_args in parsed_calls:
-                        status_message = self.display_tool(tool_call.function.name, tool_args)
-                        if tool_call_callback:
-                            tool_call_callback(
-                                tool_name=tool_call.function.name,
-                                label=status_message,
-                                args=tool_args,
-                            )
-                        elif status_callback:
-                            status_callback(status_message, is_thinking=False)
-
-                    async def _execute_one(tool_call, tool_args, worker_id=None):
-                        if stop_event.is_set():
-                            raise KeyboardInterrupt()
-
-                        tool_span = None
-                        if trace:
-                            try:
-                                tool_span = trace.span(name=tool_call.function.name, input=tool_args)
-                            except Exception as le:
-                                print(f"[Langfuse] Failed to create tool span: {le}", file=sys.stderr)
-
-                        if tool_call.function.name == "subagent" and not is_plan_mode:
-                            task_description = tool_args.get("task", "")
-
-                            if worker_event_callback:
-                                worker_event_callback(
-                                    "worker_spawned",
-                                    {
-                                        "worker_id": worker_id,
-                                        "name": worker_id,
-                                        "description": task_description,
-                                    },
-                                )
-
-                            def _make_wrapped_callback(wid, orig_cb, we_cb):
-                                def _wrapped(message, is_thinking=False, **kwargs):
-                                    if orig_cb and not we_cb:
-                                        orig_cb(message, is_thinking=is_thinking, **kwargs)
-                                    if we_cb:
-                                        if is_thinking:
-                                            we_cb(
-                                                "worker_detail",
-                                                {
-                                                    "worker_id": wid,
-                                                    "detail_type": "thinking",
-                                                    "content": message,
-                                                },
-                                            )
-                                        else:
-                                            we_cb(
-                                                "worker_notification",
-                                                {
-                                                    "worker_id": wid,
-                                                    "status": "running",
-                                                    "summary": message,
-                                                },
-                                            )
-                                return _wrapped
-
-                            def _make_wrapped_tool_call_callback(wid, orig_cb, we_cb):
-                                def _wrapped(tool_name, label, args):
-                                    if orig_cb and not we_cb:
-                                        orig_cb(tool_name, label, args)
-                                    if we_cb:
-                                        we_cb(
-                                            "worker_detail",
-                                            {
-                                                "worker_id": wid,
-                                                "detail_type": "tool_call",
-                                                "content": label,
-                                                "tool_name": tool_name,
-                                                "args": args,
-                                            },
-                                        )
-                                return _wrapped
-
-                            def _make_wrapped_tool_output_callback(wid, we_cb):
-                                def _wrapped(tool_name, output):
-                                    if we_cb:
-                                        we_cb(
-                                            "worker_detail",
-                                            {
-                                                "worker_id": wid,
-                                                "detail_type": "tool_output",
-                                                "content": str(output),
-                                                "tool_name": tool_name,
-                                            },
-                                        )
-                                return _wrapped
-
-                            tool_args["_status_callback"] = _make_wrapped_callback(
-                                worker_id, status_callback, worker_event_callback
-                            )
-                            tool_args["_tool_call_callback"] = _make_wrapped_tool_call_callback(
-                                worker_id, tool_call_callback, worker_event_callback
-                            )
-                            tool_args["_tool_output_callback"] = _make_wrapped_tool_output_callback(
-                                worker_id, worker_event_callback
-                            )
-                            tool_args["_stop_event"] = stop_event
-
-                        if tool_call.function.name == "send_notification" and not is_plan_mode:
-                            tool_args["_notification_callback"] = self._notification_callback
-                            tool_args["_agent_id"] = self.id
-
-                        if tool_call.function.name == "load_skill":
-                            tool_args["_agent"] = self
-
-                        try:
-                            tool_output = await self._run_tool_for_current_turn_async(
-                                tool_call.function.name,
-                                is_plan_mode,
-                                **tool_args,
-                            )
-                            if tool_output_callback:
-                                tool_output_callback(tool_call.function.name, tool_output)
-                            if worker_id and worker_event_callback:
-                                worker_event_callback(
-                                    "worker_status",
-                                    {
-                                        "worker_id": worker_id,
-                                        "status": "completed",
-                                        "result": str(tool_output),
-                                    },
-                                )
-                        except Exception as e:
-                            tool_output = f"Error executing tool: {str(e)}"
-                            if tool_output_callback:
-                                tool_output_callback(tool_call.function.name, tool_output)
-                            if worker_id and worker_event_callback:
-                                worker_event_callback(
-                                    "worker_status",
-                                    {
-                                        "worker_id": worker_id,
-                                        "status": "failed",
-                                        "result": str(e),
-                                    },
-                                )
-
-                        if tool_span:
-                            try:
-                                tool_span.end(output=tool_output)
-                            except Exception as le:
-                                print(f"[Langfuse] Failed to end tool span: {le}", file=sys.stderr)
-
-                        if tool_call.function.name in ("todo_write", "todo_update", "todo_read") and todo_display_callback:
-                            try:
-                                todo_data = json.loads(tool_output)
-                                if "items" in todo_data:
-                                    todo_display_callback(todo_data["items"])
-                            except (json.JSONDecodeError, KeyError):
-                                pass
-
-                        return tool_call, tool_output
-
-                    coros = []
-                    for tc, ta in parsed_calls:
-                        wid = None
-                        if tc.function.name == "subagent":
-                            self._subagent_counter += 1
-                            wid = f"subagent-{self._subagent_counter}"
-                        coros.append(_execute_one(tc, ta, wid))
-
-                    results = await asyncio.gather(
-                        *coros,
-                        return_exceptions=True,
-                    )
-
-                    self.add_assistant_message(content=accumulated_content, tool_calls=final_tool_calls)
-                    for res in results:
-                        if isinstance(res, Exception):
-                            # Log but continue; the tool error is embedded in the output
-                            continue
-                        tool_call, output = res
-                        self.add_tool_message(tool_call, output)
-
-                    self.update_context_size()
-                    self.iteration += 1
-                else:
-                    self.add_assistant_message(accumulated_content)
-                    self.update_context_size()
-
-                    if is_plan_mode:
-                        self.set_mode(name="default")
-
-                    if trace:
-                        try:
-                            trace.update(
-                                output={
-                                    "response": accumulated_content,
-                                    "iterations": self.iteration + 1,
-                                }
-                            )
-                        except Exception as le:
-                            print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
-
-                    return accumulated_content
-
-            if is_plan_mode:
-                self.set_mode(name="default")
-
-            if trace:
-                try:
-                    trace.update(
-                        output={
-                            "error": "Max iterations reached",
-                            "iterations": self.iteration,
-                        }
-                    )
-                except Exception as le:
-                    print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
 
             return "Max iterations reached. Process terminated."
         finally:

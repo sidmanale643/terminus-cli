@@ -1,7 +1,6 @@
 from src.prompts.planner_prompt import get_planner_prompt
 from src.prompts.system_prompt import get_system_prompt
 from src.prompts.init_prompt import get_init_prompt
-from src.prompts.coordinator_prompt import get_coordinator_prompt
 from src.prompts.compaction_prompt import get_compaction_prompt
 
 class PromptManager:
@@ -10,7 +9,6 @@ class PromptManager:
         self.system_prompt = get_system_prompt(cwd)
         self.planner_prompt = get_planner_prompt(cwd)
         self.init_prompt= get_init_prompt()
-        self.coordinator_prompt= get_coordinator_prompt(self.system_prompt)
         self.compaction_prompt = get_compaction_prompt()
         
         self.prompts = {}
@@ -26,9 +24,6 @@ class PromptManager:
     
     def get_init_prompt(self):
         return self.init_prompt
-    
-    def get_coordinator_prompt(self):
-        return self.coordinator_prompt
     
     def get_compaction_prompt(self):
         return self.compaction_prompt
