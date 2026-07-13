@@ -2,6 +2,7 @@ import json
 import os
 import queue
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -266,7 +267,12 @@ class ReactDisplay:
             {
                 "type": "command_list",
                 "commands": [
-                    {"name": command.name, "description": command.description}
+                    {
+                        "name": command.name,
+                        "usage": command.usage,
+                        "description": command.description,
+                        "aliases": command.aliases,
+                    }
                     for command in CommandRegistry.all()
                 ],
             }
@@ -303,7 +309,12 @@ class ReactDisplay:
         self.send_immediate({"type": "input_request"})
         while True:
             if self._proc.poll() is not None:
-                raise RuntimeError("React UI process exited unexpectedly")
+                returncode = self._proc.returncode
+                if returncode in (0, 128 + signal.SIGINT, -signal.SIGINT):
+                    raise EOFError("React UI exited")
+                raise RuntimeError(
+                    f"React UI process exited unexpectedly (code {returncode})"
+                )
             msg = self._read(block=True, timeout=0.5)
             if msg.get("type") == "input":
                 content = msg.get("content", "")
@@ -457,12 +468,13 @@ class ReactDisplay:
         content = self._clean_text(content)
         if not content.strip():
             return
+        tag = "command" if content.lstrip().startswith("/") else "user"
         self.send_immediate(
             {
                 "type": "response",
                 "id": self._next_id("timeline"),
                 "content": content,
-                "tag": "user",
+                "tag": tag,
             }
         )
 
@@ -488,12 +500,6 @@ class ReactDisplay:
         item_id = self._active_stream_item_id or self._next_id("stream")
         self._active_stream_item_id = None
         self.send_immediate({"type": "stream_end", "itemId": item_id, "content": self._bounded_text(content)})
-
-    def send_mode_switch(self, mode: str, note: str | None = None):
-        payload = {"type": "mode_switch", "mode": mode}
-        if note:
-            payload["note"] = note
-        self.send_immediate(payload)
 
     def send_worker_spawned(self, worker_id: str, name: str, description: str, role: str | None = None):
         self.send_event({
@@ -585,10 +591,26 @@ class ReactDisplay:
             self.print_message(line)
 
     def render_help(self):
-        self.print_message(
-            "Commands: /help, /plan <task>, /context, /history, /reset, "
-            "/context_size, /copy, /clear, /models, /skills, /skill <name>, exit/quit"
+        self.send_immediate(
+            {
+                "type": "help",
+                "commands": [
+                    {
+                        "name": command.name,
+                        "usage": command.usage,
+                        "description": command.description,
+                        "aliases": command.aliases,
+                    }
+                    for command in CommandRegistry.all()
+                ],
+            }
         )
+        while True:
+            msg = self._read(block=True, timeout=0.5)
+            if msg.get("type") == "help_closed":
+                return
+            if msg.get("type") == "interrupt":
+                raise KeyboardInterrupt()
 
     def render_skills(self, skills: list):
         if not skills:
@@ -828,13 +850,15 @@ class ReactResponseHandler:
             self._thinking_active = True
             if self._active_thinking_item_id is None:
                 self._active_thinking_item_id = self.display._next_id("thinking")
+            self._thinking_buffer.append(message)
+            content = "".join(self._thinking_buffer)
             self.display.send_event(
                 {
                     "type": "thinking",
                     "id": self._active_thinking_item_id,
-                    "content": self.display._bounded_text(message),
+                    "content": self.display._bounded_text(content),
                     "collapsible": True,
-                    "preview": self.display._preview_text(message),
+                    "preview": self.display._preview_text(content),
                 }
             )
         else:

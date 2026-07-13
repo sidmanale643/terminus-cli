@@ -48,6 +48,12 @@ export function parseSgrMouseClick(input: string): MouseClick | null {
   return parseModernMouseClick(input) ?? parseLegacyMouseClick(input);
 }
 
+export function parseSgrMouseClicks(input: string): MouseClick[] {
+  return parseMouseChunks(input)
+    .map((chunk) => parseSgrMouseClick(chunk))
+    .filter((click): click is MouseClick => Boolean(click));
+}
+
 export function parseSgrMouseWheel(input: string): MouseWheel | null {
   return parseModernMouseWheel(input) ?? parseLegacyMouseWheel(input);
 }

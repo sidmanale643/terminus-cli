@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useReducer, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { SocketClient } from "./socket-client.js";
@@ -37,7 +37,7 @@ import {
   enableSgrMouseReporting,
   findTranscriptMouseHit,
   isSgrMouseInput,
-  parseSgrMouseClick,
+  parseSgrMouseClicks,
   parseSgrMouseWheels,
   type TranscriptHitArea,
 } from "./mouse.js";
@@ -51,6 +51,7 @@ import {
   type RenderedTranscriptLine,
   type ScrollAction,
 } from "./viewport.js";
+
 import {
   buildWorkerPaneRows,
   type WorkerPaneRow,
@@ -58,24 +59,21 @@ import {
 } from "./worker-view.js";
 
 const COLORS = {
-  background: "#0d1117",
-  panel: "#161b22",
-  panelMuted: "#1c2128",
-  border: "#30363d",
-  borderMuted: "#21262d",
-  text: "#f0f6fc",
-  dim: "#8b949e",
-  muted: "#6e7681",
-  accent: "#58a6ff",
-  accentSoft: "#1f6feb",
-  danger: "#ff7b72",
-  success: "#7ee787",
-  info: "#79c0ff",
-  cyan: "#39d0d8",
-  cyanSoft: "#1a9e96",
-  teal: "#2dd4bf",
-  bannerGradient: ["#79c0ff", "#6bb3ff", "#58a6ff", "#4c9aff", "#3d8bfd", "#2d7af7"],
-  glow: "#58a6ff",
+  background: "#09070D", // Obsidian
+  panel: "#181320", // Ink violet
+  border: "#3B3048",
+  borderHover: "#8067A6",
+  text: "#F5F1FA", // Platinum
+  dim: "#B9B0C5",
+  muted: "#786E86",
+  accent: "#A98BEF", // Amethyst
+  accentSoft: "#D2B9FF", // Pale orchid
+  danger: "#FF6F91",
+  success: "#E2C66D", // Antique gold
+  info: "#91A7F2", // Periwinkle
+  warning: "#E7B85C",
+  shadow: "#050407",
+  bannerGradient: ["#D8C6FF", "#C5ACFA", "#B295F3", "#9F83E5", "#8D76CE", "#7B69B6"],
 };
 
 const WIDE_BANNER_MIN_WIDTH = 78;
@@ -83,15 +81,24 @@ const WIDE_BANNER_ROWS = 9;
 const COMPACT_BANNER_ROWS = 4;
 const HERO_SECTION_ROWS = 0;
 const STATUS_CARDS_ROWS = 5;
+const WELCOME_IDENTITY_WIDTH = 48;
+const TERMINUS_WORDMARK = [
+  "╺┳╸┏━╸┏━┓┏┳┓╻┏┓╻╻ ╻┏━┓",
+  " ┃ ┣╸ ┣┳┛┃┃┃┃┃┗┫┃ ┃┗━┓",
+  " ╹ ┗━╸╹┗╸╹ ╹╹╹ ╹┗━┛┗━┛",
+];
 const COMPACT_LABEL_LENGTH = 18;
 const COMPACT_BODY_LENGTH = 52;
 const TRANSCRIPT_CONTENT_COLUMN = 3;
 const TRANSCRIPT_FIRST_CONTENT_ROW = 2;
+const MAX_SIDE_WORKER_PANE_ROWS = 14;
 const TRANSCRIPT_CHROME_COLUMNS = 4;
 const TRANSCRIPT_WHEEL_ROWS = 2;
-const TRANSCRIPT_SMOOTH_SCROLL_FRAME_MS = 12;
-const MAX_SIDE_WORKER_PANE_ROWS = 14;
+const TRANSCRIPT_SMOOTH_SCROLL_FRAME_MS = 24;
 const MODAL_OPTION_ROWS = 10;
+const HELP_MODAL_MAX_ROWS = 12;
+const HELP_MODAL_CHROME_ROWS = 8;
+const HELP_COMMAND_ROWS = 3;
 const REVIEW_SUBMIT_INDEX_OFFSET = 1;
 
 function homeCompressed(pathValue: string): string {
@@ -118,6 +125,7 @@ export function calculateBannerRows(width: number, hasBanner: boolean): number {
 
 export function calculateIntroRows(width: number, hasBanner: boolean): number {
   const bannerRows = calculateBannerRows(width, hasBanner);
+  if (hasBanner && shouldUseWideBanner(width)) return bannerRows + HERO_SECTION_ROWS;
   return bannerRows + HERO_SECTION_ROWS + STATUS_CARDS_ROWS;
 }
 
@@ -180,7 +188,7 @@ function parseInlineMarkdown(value: string): InlineToken[] {
   return tokens;
 }
 
-function MarkdownInline({ text, color }: { text: string; color: string }) {
+const MarkdownInline = memo(function MarkdownInline({ text, color }: { text: string; color: string }) {
   const tokens = parseInlineMarkdown(text);
   return (
     <>
@@ -214,7 +222,7 @@ function MarkdownInline({ text, color }: { text: string; color: string }) {
       })}
     </>
   );
-}
+});
 
 export function markdownDisplayRows(markdown: string, width: number): string[] {
   const rows: string[] = [];
@@ -307,7 +315,7 @@ function roleColor(item: TranscriptItem): string {
     case "error":
       return COLORS.danger;
     case "warning":
-      return COLORS.accent;
+      return COLORS.warning;
     case "tool":
       return COLORS.info;
     case "worker":
@@ -323,6 +331,56 @@ function roleColor(item: TranscriptItem): string {
 
 type TranscriptGroup = "major" | "internal" | "worker" | "notice";
 
+const TOOL_ACTION_LABELS: Record<string, string> = {
+  ask_question: "Ask",
+  bash: "Run",
+  file_creator: "Write",
+  file_editor: "Edit",
+  file_reader: "Read",
+  glob: "Find",
+  grep_search: "Search",
+  load_skill: "Load",
+  ls: "List",
+  sandbox: "Run",
+  send_notification: "Notify",
+  subagent: "Delegate",
+  todo_read: "Tasks",
+  todo_update: "Update",
+  todo_write: "Add",
+  web_search: "Search",
+};
+
+function toolActionLabel(toolName?: string): string {
+  const normalized = (toolName || "tool").toLowerCase();
+  const knownLabel = TOOL_ACTION_LABELS[normalized];
+  if (knownLabel) return knownLabel;
+
+  const action = normalized.split("__").at(-1)?.split(/[_-]/).find(Boolean) || "tool";
+  const inferredLabels: Record<string, string> = {
+    add: "Add",
+    create: "Create",
+    delete: "Delete",
+    edit: "Edit",
+    execute: "Run",
+    fetch: "Read",
+    find: "Find",
+    get: "Read",
+    list: "List",
+    patch: "Edit",
+    post: "Send",
+    query: "Search",
+    read: "Read",
+    remove: "Delete",
+    run: "Run",
+    search: "Search",
+    send: "Send",
+    set: "Update",
+    update: "Update",
+    write: "Write",
+  };
+  return inferredLabels[action] || `${action.charAt(0).toUpperCase()}${action.slice(1)}`;
+}
+
 function transcriptMeta(item: TranscriptItem): {
   label: string;
   labelColor: string;
@@ -331,6 +389,12 @@ function transcriptMeta(item: TranscriptItem): {
   if (item.tone === "user") {
     return { label: "You", labelColor: COLORS.accent, bodyColor: COLORS.text };
   }
+  if (item.tone === "command") {
+    return { label: "›", labelColor: COLORS.accent, bodyColor: COLORS.dim };
+  }
+  if (item.tone === "system") {
+    return { label: "•", labelColor: COLORS.muted, bodyColor: COLORS.dim };
+  }
   if (item.kind === "thinking") {
     return { label: "Thinking", labelColor: COLORS.dim, bodyColor: COLORS.dim };
   }
@@ -338,7 +402,11 @@ function transcriptMeta(item: TranscriptItem): {
     return { label: "Assistant", labelColor: COLORS.info, bodyColor: COLORS.text };
   }
   if (item.kind === "tool_call") {
-    return { label: "Tool call", labelColor: COLORS.dim, bodyColor: COLORS.dim };
+    return {
+      label: toolActionLabel(item.title),
+      labelColor: COLORS.accent,
+      bodyColor: COLORS.accent,
+    };
   }
   if (item.kind === "tool_output") {
     return { label: "Tool output", labelColor: COLORS.dim, bodyColor: COLORS.dim };
@@ -347,7 +415,7 @@ function transcriptMeta(item: TranscriptItem): {
     return { label: "Error", labelColor: COLORS.danger, bodyColor: COLORS.danger };
   }
   if (item.tone === "warning") {
-    return { label: item.title ?? "Notice", labelColor: COLORS.accent, bodyColor: COLORS.text };
+    return { label: item.title ?? "Notice", labelColor: COLORS.warning, bodyColor: COLORS.text };
   }
   if (item.tone === "worker") {
     return { label: "Worker", labelColor: COLORS.success, bodyColor: COLORS.text };
@@ -356,7 +424,7 @@ function transcriptMeta(item: TranscriptItem): {
 }
 
 function isCompactTranscriptItem(item: TranscriptItem): boolean {
-  return item.kind === "thinking" || item.kind === "tool_call" || item.kind === "tool_output";
+  return item.kind === "thinking" || item.kind === "tool_call" || item.kind === "tool_output" || item.tone === "command" || item.tone === "system";
 }
 
 function transcriptGroup(item: TranscriptItem): TranscriptGroup {
@@ -402,7 +470,7 @@ function toolOutputName(title?: string): string {
 function transcriptPreview(item: TranscriptItem, expanded: boolean): string {
   if (item.kind === "tool_call") {
     const args = expanded ? compactJsonBody(item.body, 900) : compactJsonBody(item.body);
-    return [item.title, args].filter(Boolean).join(" ");
+    return args;
   }
   if (item.kind === "tool_output") {
     const output = expanded ? item.body : compactLine(item.preview || item.body, COMPACT_BODY_LENGTH);
@@ -449,40 +517,13 @@ function Spinner({
   return <Text color={color}>{frames[frameIndex]}</Text>;
 }
 
-function CommandSuggestions({
-  commands,
-  query,
-  selectedIndex,
-}: {
-  commands: CommandOption[];
-  query: string;
-  selectedIndex: number;
-}) {
-  const filtered = commands.filter((command) => command.name.startsWith(query));
-  return (
-    <Box flexDirection="column" marginLeft={2}>
-      {filtered.slice(0, 8).map((command, index) => (
-        <Text
-          key={command.name}
-          color={index === selectedIndex ? COLORS.background : COLORS.dim}
-          backgroundColor={index === selectedIndex ? COLORS.cyan : undefined}
-        >
-          {`${index === selectedIndex ? ">" : " "} ${command.name.padEnd(14)} ${command.description}`}
-        </Text>
-      ))}
-    </Box>
-  );
-}
-
 function InputPanel({
   active,
   commands,
   connectionError,
   isGenerating,
-  cwd,
   model,
   contextPercent,
-  width,
   onSubmit,
   onInterrupt,
   onCopyLast,
@@ -491,35 +532,31 @@ function InputPanel({
   commands: CommandOption[];
   connectionError: string | null;
   isGenerating: boolean;
-  cwd: string;
   model: string;
   contextPercent: number;
-  width: number;
   onSubmit: (value: string) => void;
   onInterrupt: () => void;
   onCopyLast: () => void;
 }) {
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
-  const [selectedIndex, setSelectedIndex] = useState(0);
-
-  const commandQuery = value.startsWith("/") ? value : "";
-  const filtered = commandQuery
-    ? commands.filter((command) => command.name.startsWith(commandQuery))
-    : [];
-  const showSuggestions = active && commandQuery.length > 0;
-  const footerRight = `${formatPercent(contextPercent)}  ${model || "no-model"}`;
-  const footerLeft = truncateMiddle(homeCompressed(cwd), Math.max(12, width - footerRight.length - 5));
-  const footerGap = Math.max(1, width - footerLeft.length - footerRight.length - 4);
+  const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const commandSuggestions = commandSuggestionsFor(value, commands);
+  const modelLabel = truncateMiddle(model || "no model selected", 34);
+  const contextBlocks = Math.max(0, Math.min(8, Math.round(contextPercent * 8 / 100)));
+  const contextGauge = `${"■".repeat(contextBlocks)}${"·".repeat(8 - contextBlocks)}`;
   const cursorGlyph = active ? "▌" : "▏";
-  const cursorColor = active ? COLORS.cyan : COLORS.dim;
+  const cursorColor = active ? COLORS.accent : COLORS.muted;
 
   useEffect(() => {
     if (!active) return;
     setValue("");
     setCursor(0);
-    setSelectedIndex(0);
   }, [active]);
+
+  useEffect(() => {
+    setSuggestionIndex(0);
+  }, [value]);
 
   useInput((input, key) => {
     if (isSgrMouseInput(input)) return;
@@ -537,34 +574,39 @@ function InputPanel({
       setCursor((current) => Math.max(0, current - 1));
       return;
     }
+    if (key.upArrow && commandSuggestions.length > 0) {
+      setSuggestionIndex((current) => Math.max(0, current - 1));
+      return;
+    }
+    if (key.downArrow && commandSuggestions.length > 0) {
+      setSuggestionIndex((current) => Math.min(commandSuggestions.length - 1, current + 1));
+      return;
+    }
+    if (input === "\t" && commandSuggestions.length > 0) {
+      const completed = commandSuggestions[suggestionIndex]?.name;
+      if (completed) {
+        setValue(completed);
+        setCursor(completed.length);
+      }
+      return;
+    }
     if (key.rightArrow) {
       setCursor((current) => Math.min(value.length, current + 1));
       return;
     }
-    if (showSuggestions && key.upArrow) {
-      setSelectedIndex((current) => Math.max(0, current - 1));
-      return;
-    }
-    if (showSuggestions && key.downArrow) {
-      setSelectedIndex((current) => Math.min(filtered.length - 1, current + 1));
-      return;
-    }
-    if (key.backspace || key.delete) {
+    if (key.backspace || key.delete || input === "\u007f" || input === "\b") {
       if (cursor === 0) return;
       setValue((current) => current.slice(0, cursor - 1) + current.slice(cursor));
       setCursor((current) => current - 1);
       return;
     }
     if (key.return) {
-      const submitted =
-        showSuggestions && filtered[selectedIndex]
-          ? filtered[selectedIndex].name
-          : value.trim();
+      const selectedCommand = commandSuggestions[suggestionIndex]?.name;
+      const submitted = (selectedCommand ?? value).trim();
       if (!submitted) return;
       onSubmit(submitted);
       setValue("");
       setCursor(0);
-      setSelectedIndex(0);
       return;
     }
     if (!key.ctrl && !key.meta && input.length > 0) {
@@ -575,45 +617,59 @@ function InputPanel({
 
   return (
     <>
-      {isGenerating ? (
-        <Box>
-          <Spinner active={true} />
-          <Text color={COLORS.dim}> Generating response  </Text>
-          <Text color={COLORS.cyan}>Ctrl+C</Text>
-          <Text color={COLORS.dim}> interrupt</Text>
-        </Box>
-      ) : null}
-      <Box flexDirection="column" borderStyle="round" borderColor={active ? COLORS.cyanSoft : COLORS.border} paddingX={1} paddingY={0}>
+      <Box
+        flexDirection="column"
+        borderStyle="single"
+        borderColor={active ? COLORS.accent : COLORS.border}
+        paddingX={1}
+      >
         {connectionError ? <Text color={COLORS.danger}>{connectionError}</Text> : null}
+        <Box justifyContent="space-between">
+          <Text color={active ? COLORS.accentSoft : COLORS.muted} bold>◈ TERMINUS</Text>
+          <Text>
+            <Text color={COLORS.dim}>{modelLabel}</Text>
+            <Text color={COLORS.borderHover}>{"  │  "}</Text>
+            <Text color={contextPercent >= 75 ? COLORS.danger : COLORS.accent}>{contextGauge}</Text>
+            <Text color={COLORS.muted}>{` ${formatPercent(contextPercent)}`}</Text>
+          </Text>
+        </Box>
         <Box>
-          <Text color={COLORS.cyan}>{"> "}</Text>
+          <Text color={active ? COLORS.accentSoft : COLORS.muted} bold>{"//  "}</Text>
           <Text color={COLORS.text}>{value.slice(0, cursor)}</Text>
           <Text color={cursorColor}>{cursorGlyph}</Text>
           <Text color={COLORS.text}>{value.slice(cursor)}</Text>
         </Box>
-        <Box marginTop={0}>
-          <Text color={COLORS.dim}>{footerLeft}</Text>
-          <Text>{" ".repeat(footerGap)}</Text>
-          <Text color={COLORS.accent}>{formatPercent(contextPercent)}</Text>
-          <Text color={COLORS.dim}>{"  "}</Text>
-          <Text color={COLORS.text}>{model || "no-model"}</Text>
-        </Box>
-        {showSuggestions ? (
-          <CommandSuggestions commands={commands} query={commandQuery} selectedIndex={selectedIndex} />
+        {commandSuggestions.length > 0 ? (
+          <Box flexDirection="column" marginLeft={3} marginTop={1}>
+            {commandSuggestions.map((command, index) => (
+              <Text key={command.name} wrap="truncate">
+                <Text color={index === suggestionIndex ? COLORS.accent : COLORS.dim} bold={index === suggestionIndex}>
+                  {`${index === suggestionIndex ? "›" : " "} ${command.name}`}
+                </Text>
+                <Text color={COLORS.muted}>{`  ${command.description}`}</Text>
+              </Text>
+            ))}
+            <Text color={COLORS.muted}>↑↓ select   tab complete</Text>
+          </Box>
         ) : null}
       </Box>
-      {active ? (
-        <Box justifyContent="space-between" paddingLeft={1}>
-          <Text color={COLORS.dim}>
-            <Text color={COLORS.cyan}>Enter</Text> submit{"  "}
-            <Text color={COLORS.cyan}>Ctrl+C</Text> interrupt{"  "}
-            <Text color={COLORS.cyan}>Tab</Text> autocomplete
-          </Text>
-        </Box>
-      ) : (
-        <Text color={COLORS.dim}>Ready</Text>
-      )}
+      <Box justifyContent="flex-end" paddingX={2}>
+        <Text color={isGenerating ? COLORS.accent : COLORS.muted}>
+          {isGenerating ? <><Spinner active={true} color={COLORS.accentSoft} /> processing</> : <><Text color={COLORS.success}>◆</Text> ready</>}
+        </Text>
+      </Box>
     </>
+  );
+}
+
+const MemoInputPanel = memo(InputPanel);
+
+export function commandSuggestionsFor(value: string, commands: CommandOption[]): CommandOption[] {
+  if (!value.startsWith("/") || /\s/.test(value)) return [];
+  const query = value.toLowerCase();
+  return commands.filter((command) =>
+    command.name.toLowerCase().startsWith(query)
+    || command.aliases?.some((alias) => alias.toLowerCase().startsWith(query)),
   );
 }
 
@@ -625,6 +681,28 @@ interface TranscriptLinePayload {
 
 type TranscriptDisplayLine = RenderedTranscriptLine<TranscriptLinePayload>;
 
+const transcriptItemLineCache = new WeakMap<TranscriptItem, Map<string, TranscriptDisplayLine[]>>();
+
+function cachedTranscriptItemLines(
+  item: TranscriptItem,
+  expanded: boolean,
+  width: number,
+): TranscriptDisplayLine[] {
+  const cacheKey = `${width}:${expanded ? 1 : 0}`;
+  let itemCache = transcriptItemLineCache.get(item);
+  if (!itemCache) {
+    itemCache = new Map();
+    transcriptItemLineCache.set(item, itemCache);
+  }
+  const cached = itemCache.get(cacheKey);
+  if (cached) return cached;
+
+  const lines: TranscriptDisplayLine[] = [];
+  appendTranscriptItemLines(lines, item, expanded, width);
+  itemCache.set(cacheKey, lines);
+  return lines;
+}
+
 function buildTranscriptLines(options: {
   items: TranscriptItem[];
   streams: StreamingItem[];
@@ -633,10 +711,15 @@ function buildTranscriptLines(options: {
 }): TranscriptDisplayLine[] {
   const lines: TranscriptDisplayLine[] = [];
   const contentWidth = Math.max(1, options.width);
+  const visibleItems = options.items.filter((item) => item.kind !== "tool_output");
 
-  options.items.forEach((item, index) => {
-    appendTranscriptGap(lines, item, options.items[index - 1]);
-    appendTranscriptItemLines(lines, item, Boolean(options.expandedIds[item.id]), contentWidth);
+  visibleItems.forEach((item, index) => {
+    appendTranscriptGap(lines, item, visibleItems[index - 1]);
+    lines.push(...cachedTranscriptItemLines(
+      item,
+      Boolean(options.expandedIds[item.id]),
+      contentWidth,
+    ));
   });
 
   options.streams.forEach((stream) => {
@@ -712,9 +795,12 @@ function appendExpandedTranscriptLines(
   const bodyPrefix = item.kind === "tool_output" ? `${toolOutputName(item.title)} ` : "";
 
   if (compactItem && body.trim() && !body.includes("\n")) {
+    const compactText = item.tone === "command" || item.tone === "system"
+      ? `${label} ${compactLine(body, COMPACT_BODY_LENGTH)}`
+      : `${label}: ${bodyPrefix}${compactLine(body, COMPACT_BODY_LENGTH)}`;
     appendWrappedTranscriptLine(lines, {
       sourceId: item.id,
-      text: `${expanded ? "[-] " : ""}${label}: ${bodyPrefix}${compactLine(body, COMPACT_BODY_LENGTH)}`,
+      text: `${expanded ? "[-] " : ""}${compactText}`,
       width,
       payload: { color: meta.bodyColor, dim: isInternal, hitId },
     });
@@ -851,12 +937,14 @@ function useSmoothScrollOffset(totalRows: number, viewportRows: number) {
   };
 
   const moveByAction = (action: ScrollAction) => {
-    targetOffset.current = applyScrollAction(
+    const nextTarget = applyScrollAction(
       targetOffset.current,
       action,
       totalRowsRef.current,
       viewportRowsRef.current,
     );
+    if (nextTarget === targetOffset.current) return;
+    targetOffset.current = nextTarget;
     animateTowardTarget();
   };
 
@@ -929,7 +1017,7 @@ function Transcript({
         return;
       }
 
-      const click = parseSgrMouseClick(input);
+      const click = parseSgrMouseClicks(input)[0];
       if (!click) return;
       if (!isMouseWithinBounds(click, { top, left, width, height })) return;
 
@@ -984,7 +1072,7 @@ function workerRoleColor(role: string): string {
   if (role === "implementer") return COLORS.accent;
   if (role === "verifier") return COLORS.success;
   if (role === "summarizer") return COLORS.info;
-  if (role === "explorer") return "#b48ead";
+  if (role === "explorer") return COLORS.warning;
   return COLORS.text;
 }
 
@@ -1058,7 +1146,10 @@ function WorkerPaneBodyRow({
   }
 
   const labelWidth = Math.min(14, Math.max(0, width - 6));
-  const label = compactLine(row.line.label, labelWidth).padEnd(labelWidth);
+  const activityLabel = row.line.activity.type === "tool_call"
+    ? toolActionLabel(row.line.activity.toolName || row.line.activity.title)
+    : row.line.label;
+  const label = compactLine(activityLabel, labelWidth).padEnd(labelWidth);
   const prefix = ` ${row.line.marker} `;
   const detail = row.line.detail ? ` ${row.line.detail}` : "";
   const availableDetailWidth = Math.max(0, width - prefix.length - label.length);
@@ -1271,55 +1362,27 @@ function WorkerPanes({
   );
 }
 
-function SectionCard({
-  title,
-  titleColor,
-  children,
-  width,
-  marginBottom,
-}: {
-  title: string;
-  titleColor?: string;
-  children: React.ReactNode;
-  width?: number;
-  marginBottom?: number;
-}) {
-  return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={COLORS.borderMuted}
-      paddingX={1}
-      paddingTop={0}
-      paddingBottom={0}
-      width={width}
-      marginBottom={marginBottom}
-    >
-      <Text color={titleColor ?? COLORS.accent} bold wrap="truncate">{title}</Text>
-      {children}
-    </Box>
-  );
-}
-
 function StatusCards({
   cwd,
   commands,
   transcriptItems,
   width,
+  height,
 }: {
   cwd: string;
   commands: CommandOption[];
   transcriptItems: TranscriptItem[];
   width: number;
+  height?: number;
 }) {
   const availableCommands = new Set(commands.map((c) => c.name));
-  const innerWidth = Math.max(1, width - 4);
-  const workspaceLabel = truncateMiddle(homeCompressed(cwd), Math.max(18, innerWidth - 12));
+  const innerWidth = Math.max(1, width - 6);
+  const workspaceLabel = truncateMiddle(homeCompressed(cwd), Math.max(12, innerWidth - 2));
 
   const shortcutCommands = ["/plan", "/connect", "/compact", "/models"];
   const visibleShortcuts = shortcutCommands.filter((cmd) => availableCommands.has(cmd));
 
-  const toolCommands = ["/mcp", "/skills", "/mode", "/init"];
+  const toolCommands = ["/mcp", "/skills", "/init"];
   const visibleTools = toolCommands.filter((cmd) => availableCommands.has(cmd));
 
   const recentCommands = transcriptItems
@@ -1327,50 +1390,71 @@ function StatusCards({
     .slice(-3)
     .map((item) => item.title ?? item.kind);
 
-  const cardWidth = Math.max(1, Math.floor((innerWidth - 2) / 2));
+  const commandItems = [...visibleShortcuts, ...visibleTools];
+  const activityLabel = recentCommands.join(" · ") || "Ready for your next instruction";
+
+  if (height) {
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={COLORS.borderHover} paddingX={1} width={width} height={height}>
+        <Text color={COLORS.accentSoft} bold>◈ GRID SECTOR</Text>
+        <Text color={COLORS.text} wrap="truncate">{workspaceLabel}</Text>
+        <Text color={COLORS.muted} wrap="truncate">{activityLabel}</Text>
+        <Text color={COLORS.muted}>COMMAND LINKS</Text>
+        <Text wrap="wrap">
+          {commandItems.length > 0 ? commandItems.map((cmd, i) => (
+            <Text key={cmd} color={i < visibleShortcuts.length ? COLORS.accent : COLORS.accentSoft} bold>
+              {`${i > 0 ? "  " : ""}${cmd}`}
+            </Text>
+          )) : <Text color={COLORS.dim}>F1 opens commands</Text>}
+        </Text>
+        <Text color={COLORS.warning}>F1  COMMAND INDEX</Text>
+      </Box>
+    );
+  }
 
   return (
-    <Box flexDirection="row" flexWrap="wrap" marginBottom={1} paddingLeft={1}>
-      <SectionCard title="Workspace" titleColor={COLORS.cyan} width={cardWidth} marginBottom={1}>
-        <Text wrap="truncate">
-          <Text color={COLORS.dim}>cwd </Text>
-          <Text color={COLORS.text} bold>{workspaceLabel}</Text>
-        </Text>
-      </SectionCard>
-      <SectionCard title="Shortcuts" titleColor={COLORS.teal} width={cardWidth} marginBottom={1}>
-        <Text wrap="truncate">
-          <Text color={COLORS.dim}>{visibleShortcuts.join("  ") || "type a command"}</Text>
-        </Text>
-      </SectionCard>
-      <SectionCard title="Tools" titleColor={COLORS.info} width={cardWidth} marginBottom={1}>
-        <Text wrap="truncate">
-          <Text color={COLORS.dim}>{visibleTools.join("  ") || "F1 for commands"}</Text>
-        </Text>
-      </SectionCard>
-      <SectionCard title="Recent" titleColor={COLORS.muted} width={cardWidth} marginBottom={1}>
-        <Text wrap="truncate">
-          <Text color={COLORS.dim}>{recentCommands.join(", ") || "no recent activity"}</Text>
-        </Text>
-      </SectionCard>
+    <Box paddingX={1} marginBottom={1}>
+      <Box flexDirection="column" borderStyle="round" borderColor={COLORS.borderHover} paddingX={2} width={Math.max(1, width - 2)}>
+        <Box justifyContent="space-between">
+          <Text wrap="truncate">
+            <Text color={COLORS.accentSoft}>◈ </Text>
+            <Text color={COLORS.dim} bold>GRID SECTOR </Text>
+            <Text color={COLORS.text}>{workspaceLabel}</Text>
+          </Text>
+          <Text color={COLORS.muted} wrap="truncate">{activityLabel}</Text>
+        </Box>
+        <Box justifyContent="space-between">
+          <Text wrap="truncate">
+            <Text color={COLORS.muted}>COMMAND LINKS  </Text>
+            {commandItems.length > 0 ? commandItems.map((cmd, i) => (
+              <Text key={cmd}>
+                {i > 0 ? <Text color={COLORS.borderHover}>{"  │  "}</Text> : null}
+                <Text color={i < visibleShortcuts.length ? COLORS.accent : COLORS.accentSoft} bold>{cmd}</Text>
+              </Text>
+            )) : <Text color={COLORS.dim}>F1 opens the command palette</Text>}
+          </Text>
+          <Text color={COLORS.warning}>F1  COMMAND INDEX</Text>
+        </Box>
+      </Box>
     </Box>
   );
 }
 
-function Banner({ logo, subtitle, width }: { logo: string[]; subtitle?: string; width: number }) {
-  const useWideBanner = shouldUseWideBanner(width);
+function Banner({ logo, subtitle, width, wide }: { logo: string[]; subtitle?: string; width: number; wide?: boolean }) {
+  const useWideBanner = wide ?? shouldUseWideBanner(width);
   const tagline = subtitle === "Your coding sidekick"
-    ? "AI development cockpit for terminal-first engineering"
+    ? "ship code, faster"
     : subtitle;
 
   if (!useWideBanner) {
     const innerWidth = Math.max(18, width - 4);
     return (
       <Box flexDirection="column" marginBottom={1}>
-        <Text color={COLORS.cyan} bold wrap="truncate">
+        <Text color={COLORS.accent} bold wrap="truncate">
           {compactLine("TERMINUS", innerWidth)}
         </Text>
-        <Text color={COLORS.dim} wrap="truncate">
-          {compactLine("agentic engineering in your terminal", innerWidth)}
+        <Text color={COLORS.muted} wrap="truncate">
+          {compactLine(tagline || "command the grid", innerWidth)}
         </Text>
       </Box>
     );
@@ -1386,12 +1470,81 @@ function Banner({ logo, subtitle, width }: { logo: string[]; subtitle?: string; 
           </Text>
         );
       })}
+      {tagline ? (
+        <Text color={COLORS.muted} wrap="truncate">
+          {truncatePreservingWhitespace(tagline, width)}
+        </Text>
+      ) : null}
     </Box>
   );
 }
 
-function HeroSection({ tagline, width }: { tagline?: string; width: number }) {
-  return null;
+function WelcomePanel({
+  cwd,
+  commands,
+  model,
+  width,
+}: {
+  cwd: string;
+  commands: CommandOption[];
+  model: string;
+  width: number;
+}) {
+  const availableCommands = new Set(commands.map((command) => command.name));
+  const quickCommands = ["/plan", "/models", "/connect", "/skills"]
+    .filter((command) => availableCommands.has(command));
+  const identityWidth = Math.min(WELCOME_IDENTITY_WIDTH, Math.max(38, Math.floor(width * 0.42)));
+  const detailWidth = Math.max(24, width - identityWidth - 5);
+  const workspace = truncateMiddle(homeCompressed(cwd), Math.max(18, identityWidth - 4));
+  const modelLabel = truncateMiddle(model || "model not selected", Math.max(18, identityWidth - 4));
+
+  return (
+    <Box
+      borderStyle="single"
+      borderColor={COLORS.borderHover}
+      height={WIDE_BANNER_ROWS}
+      marginX={1}
+      paddingX={1}
+    >
+      <Box
+        width={identityWidth}
+        flexDirection="column"
+        justifyContent="space-between"
+        paddingRight={2}
+      >
+        <Box flexDirection="column">
+          {TERMINUS_WORDMARK.map((line) => (
+            <Text key={line} color={COLORS.accent} bold>{line}</Text>
+          ))}
+          <Text color={COLORS.muted}>AI development companion</Text>
+        </Box>
+        <Box flexDirection="column">
+          <Text color={COLORS.text} bold>Ready to build.  <Text color={COLORS.muted}>{workspace}</Text></Text>
+        </Box>
+      </Box>
+      <Box width={1} borderStyle="single" borderTop={false} borderBottom={false} borderLeft={true} borderRight={false} borderColor={COLORS.border} />
+      <Box flexDirection="column" paddingLeft={2} width={detailWidth}>
+        <Text color={COLORS.accentSoft} bold>WHAT ARE WE BUILDING?</Text>
+        <Text color={COLORS.dim} wrap="truncate">Describe the outcome. Terminus will inspect the codebase and work through it with you.</Text>
+        <Text color={COLORS.muted} wrap="truncate">
+          Try  <Text color={COLORS.text}>Fix the failing tests</Text>
+          <Text color={COLORS.borderHover}>  ·  </Text>
+          <Text color={COLORS.text}>Explain @src/agent.py</Text>
+        </Text>
+        <Box marginTop={1}>
+          <Text color={COLORS.muted}>Commands  </Text>
+          {quickCommands.length > 0 ? quickCommands.map((command, index) => (
+            <Text key={command} color={COLORS.text} bold>
+              {`${index > 0 ? "   " : ""}${command}`}
+            </Text>
+          )) : <Text color={COLORS.dim}>F1 opens the command index</Text>}
+        </Box>
+        <Text color={COLORS.muted} wrap="truncate">
+          {modelLabel}   ·   F1 commands   ·   Ctrl+C stop   ·   Ctrl+Y copy
+        </Text>
+      </Box>
+    </Box>
+  );
 }
 
 function SelectionModal<T extends { name: string; description?: string; loaded?: boolean }>({
@@ -1399,11 +1552,13 @@ function SelectionModal<T extends { name: string; description?: string; loaded?:
   subtitle,
   options,
   onSelect,
+  width,
 }: {
   title: string;
   subtitle: string;
   options: T[];
   onSelect: (name: string | null) => void;
+  width: number;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const optionRange = visibleOptionRange(options.length, selectedIndex, MODAL_OPTION_ROWS);
@@ -1443,24 +1598,102 @@ function SelectionModal<T extends { name: string; description?: string; loaded?:
   });
 
   return (
-    <Box flexDirection="column" borderStyle="double" borderColor={COLORS.accent} paddingX={1}>
-      <Text color={COLORS.accent}>{title}</Text>
+    <Box
+      flexDirection="column"
+      width={width}
+      borderStyle="double"
+      borderColor={COLORS.accent}
+      paddingX={2}
+      paddingY={1}
+    >
+      <Box justifyContent="space-between">
+        <Text color={COLORS.text} bold>{title}</Text>
+        <Text color={COLORS.muted}>esc</Text>
+      </Box>
       <Text color={COLORS.dim}>{subtitle}</Text>
+      <Box height={1} />
       {visibleOptions.map((option, visibleIndex) => {
         const index = optionRange.start + visibleIndex;
+        const selected = index === selectedIndex;
         return (
-        <Text
-          key={option.name}
-          color={index === selectedIndex ? COLORS.background : COLORS.text}
-          backgroundColor={index === selectedIndex ? COLORS.accent : undefined}
-        >
-          {`${index + 1}. ${option.name}${option.loaded ? " [loaded]" : ""}${option.description ? ` - ${option.description}` : ""}`}
-        </Text>
+          <Box key={option.name} width="100%">
+            <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={selected ? COLORS.accentSoft : undefined} bold={selected}>
+              {`${selected ? "●" : " "} ${index + 1}  ${option.name}${option.loaded ? "  ✓" : ""}${option.description ? `  ${option.description}` : ""}`}
+            </Text>
+          </Box>
         );
       })}
-      <Text color={COLORS.dim}>
-        {`Enter choose  Esc cancel${options.length > MODAL_OPTION_ROWS ? `  ${optionRange.start + 1}-${optionRange.end}/${options.length}` : ""}`}
-      </Text>
+      <Box height={1} />
+      <Box justifyContent="space-between">
+        <Text color={COLORS.muted}>↑↓ navigate   <Text color={COLORS.dim}>enter select   esc close</Text></Text>
+        {options.length > MODAL_OPTION_ROWS ? (
+          <Text color={COLORS.muted}>{`${optionRange.start + 1}-${optionRange.end} / ${options.length}`}</Text>
+        ) : null}
+      </Box>
+    </Box>
+  );
+}
+
+export function calculateHelpModalRows(terminalHeight: number, popupTop: number): number {
+  const availableRows = Math.max(0, terminalHeight - popupTop - HELP_MODAL_CHROME_ROWS);
+  return Math.max(1, Math.min(HELP_MODAL_MAX_ROWS, Math.floor(availableRows / HELP_COMMAND_ROWS)));
+}
+
+function HelpModal({
+  commands,
+  width,
+  rows,
+  onClose,
+}: {
+  commands: CommandOption[];
+  width: number;
+  rows: number;
+  onClose: () => void;
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const range = visibleOptionRange(commands.length, selectedIndex, rows);
+
+  useInput((_input, key) => {
+    if (key.escape || key.return) return onClose();
+    if (key.upArrow) setSelectedIndex((current) => Math.max(0, current - 1));
+    if (key.downArrow) setSelectedIndex((current) => Math.min(commands.length - 1, current + 1));
+    if (key.pageUp) setSelectedIndex((current) => Math.max(0, current - rows));
+    if (key.pageDown) setSelectedIndex((current) => Math.min(commands.length - 1, current + rows));
+  });
+
+  return (
+    <Box
+      flexDirection="column"
+      width={width}
+      paddingX={2}
+      paddingY={1}
+      borderStyle="round"
+      borderColor={COLORS.borderHover}
+    >
+      <Box justifyContent="space-between">
+        <Text color={COLORS.text} bold>Command reference</Text>
+        <Text color={COLORS.muted}>esc</Text>
+      </Box>
+      <Text color={COLORS.dim}>Everything you can run from the Terminus prompt.</Text>
+      <Box height={1} />
+      {commands.slice(range.start, range.end).map((command, visibleIndex) => {
+        const selected = range.start + visibleIndex === selectedIndex;
+        const usage = command.usage || command.name;
+        const aliasText = command.aliases?.length ? `  aliases: ${command.aliases.join(", ")}` : "";
+        return (
+          <Box key={command.name} flexDirection="column" width="100%" marginBottom={visibleIndex === range.end - range.start - 1 ? 0 : 1}>
+            <Text>
+              <Text color={selected ? COLORS.background : COLORS.dim} backgroundColor={selected ? COLORS.accentSoft : undefined} bold={selected}>{`${selected ? "● " : "  "}${usage}${aliasText}`}</Text>
+            </Text>
+            <Text color={COLORS.muted}>{`    ${command.description}`}</Text>
+          </Box>
+        );
+      })}
+      <Box height={1} />
+      <Box justifyContent="space-between">
+        <Text color={COLORS.muted}>↑↓ navigate   pgup/pgdn scroll   enter/esc close</Text>
+        <Text color={COLORS.muted}>{`${range.start + 1}-${range.end} / ${commands.length}`}</Text>
+      </Box>
     </Box>
   );
 }
@@ -1586,8 +1819,8 @@ function QuestionModal({
       setCursor((current) => Math.min(note.length, current + 1));
       return;
     }
-    if (inputFocused && (key.backspace || key.delete)) {
-      deleteQuestionNoteCharacter(questionIndex, cursor, notesRef, setNotes, setCursor);
+    if (inputFocused && (key.backspace || key.delete || input === "\u007f" || input === "\b")) {
+      deleteQuestionNoteCharacter(questionIndex, cursor, "backspace", notesRef, setNotes, setCursor);
       return;
     }
     if (key.return) {
@@ -1626,7 +1859,7 @@ function QuestionModal({
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={COLORS.accent} paddingX={2} paddingY={1}>
+    <Box flexDirection="column" paddingX={2} paddingY={1}>
       <Box justifyContent="space-between">
         <Text color={COLORS.accent} bold>
           {isReviewing ? "Review answers" : `Question ${questionIndex + 1}/${questions.length}`}
@@ -1831,17 +2064,24 @@ function insertQuestionNoteText(
 function deleteQuestionNoteCharacter(
   questionIndex: number,
   cursor: number,
+  direction: "backspace" | "delete",
   notesRef: MutableRefObject<string[]>,
   setNotes: Dispatch<SetStateAction<string[]>>,
   setCursor: Dispatch<SetStateAction<number>>,
 ): void {
-  if (cursor === 0) return;
+  const currentNote = notesRef.current[questionIndex] ?? "";
+  if (direction === "backspace" && cursor === 0) return;
+  if (direction === "delete" && cursor >= currentNote.length) return;
   const nextNotes = notesRef.current.map((note, index) => (
-    index === questionIndex ? note.slice(0, cursor - 1) + note.slice(cursor) : note
+    index === questionIndex
+      ? direction === "backspace"
+        ? note.slice(0, cursor - 1) + note.slice(cursor)
+        : note.slice(0, cursor) + note.slice(cursor + 1)
+      : note
   ));
   notesRef.current = nextNotes;
   setNotes(nextNotes);
-  setCursor((current) => current - 1);
+  if (direction === "backspace") setCursor((current) => current - 1);
 }
 
 function applyQuestionAdvanceResult(options: {
@@ -2011,7 +2251,7 @@ function ApiKeyModal({
       setCursor((current) => Math.min(value.length, current + 1));
       return;
     }
-    if (key.backspace || key.delete) {
+    if (key.backspace || key.delete || input === "\u007f" || input === "\b") {
       if (cursor === 0) return;
       setValue((current) => current.slice(0, cursor - 1) + current.slice(cursor));
       setCursor((current) => current - 1);
@@ -2028,8 +2268,11 @@ function ApiKeyModal({
   });
 
   return (
-    <Box flexDirection="column" borderStyle="double" borderColor={COLORS.accent} paddingX={1}>
-      <Text color={COLORS.accent}>{`API key for ${provider}`}</Text>
+    <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Box justifyContent="space-between">
+        <Text color={COLORS.text} bold>{`API key for ${provider}`}</Text>
+        <Text color={COLORS.muted}>esc</Text>
+      </Box>
       <Text color={COLORS.dim}>Input is visible in the terminal.</Text>
       <Box>
         <Text color={COLORS.text}>{value.slice(0, cursor)}</Text>
@@ -2049,16 +2292,16 @@ export default function App() {
   const { stdout } = useStdout();
   const terminalWidth = stdout?.columns ?? 100;
   const terminalHeight = stdout?.rows ?? 32;
-  const bannerRows = state.showIntro
-    ? calculateBannerRows(terminalWidth, Boolean(state.banner))
-    : 0;
+  const popupWidth = Math.min(78, Math.max(36, terminalWidth - 4));
+  const popupLeft = Math.max(0, Math.floor((terminalWidth - popupWidth) / 2));
+  const popupTop = Math.max(1, Math.floor(terminalHeight * 0.08));
   const introRows = state.showIntro
     ? calculateIntroRows(terminalWidth, Boolean(state.banner))
     : 0;
   const transcriptTop = 1 + introRows;
   const transcriptLeft = 1;
-  const transcriptItems = selectTranscriptItems(state);
-  const streams = selectStreamingItems(state);
+  const transcriptItems = useMemo(() => selectTranscriptItems(state), [state.transcript]);
+  const streams = useMemo(() => selectStreamingItems(state), [state.streams]);
   const workers = selectWorkers(state);
   const hasTranscript = transcriptItems.length > 0;
   const hasWorkers = workers.length > 0;
@@ -2080,12 +2323,12 @@ export default function App() {
     isGenerating: state.isGenerating,
   });
   const transcriptContentWidth = Math.max(10, workerPaneLayout.transcriptWidth - TRANSCRIPT_CHROME_COLUMNS);
-  const transcriptLines = buildTranscriptLines({
+  const transcriptLines = useMemo(() => buildTranscriptLines({
     items: transcriptItems,
     streams,
     expandedIds: expandedTranscriptIds,
     width: transcriptContentWidth,
-  });
+  }), [transcriptItems, streams, expandedTranscriptIds, transcriptContentWidth]);
   const bottomWorkerPaneHeight = workerPaneLayout.placement === "bottom"
     ? calculateBottomWorkerPaneHeight(workerPaneLayout.paneRows, mainContentRows)
     : 0;
@@ -2118,11 +2361,10 @@ export default function App() {
 
     const client = new SocketClient(socketPath, {
       onConnected: () => {
-        dispatch({ type: "connected" });
         client.send({ type: "ready" });
       },
       onDisconnected: () => {
-        dispatch({ type: "disconnected" });
+        dispatch({ type: "connection_error", error: "Disconnected from TERMINUS" });
       },
       onError: (error) => {
         dispatch({ type: "connection_error", error });
@@ -2148,30 +2390,44 @@ export default function App() {
     };
   }, [exit]);
 
-  const send = (
+  const send = useCallback((
     payload: OutboundMessage,
-    closeSelection?: "model" | "provider" | "skill" | "apiKey" | "question",
+    closeSelection?: "model" | "provider" | "skill" | "apiKey" | "question" | "help",
   ) => {
     const client = clientRef.current;
     if (!client) {
       dispatch({ type: "connection_error", error: "Not connected to TERMINUS" });
       return;
     }
-    client.send(payload);
+    if (!client.send(payload)) {
+      dispatch({ type: "connection_error", error: "Not connected to TERMINUS" });
+      return;
+    }
     if (payload.type === "input" || (payload.type === "question_answer" && payload.content.trim())) {
       dispatch({ type: "input_sent" });
     }
     if (closeSelection) {
       dispatch({ type: "selection_closed", selection: closeSelection });
     }
-  };
+  }, []);
+  const submitInput = useCallback((value: string) => send({ type: "input", content: value }), [send]);
+  const interrupt = useCallback(() => send({ type: "interrupt" }), [send]);
+  const copyLastResponse = useCallback(() => send({ type: "copy_last_response" }), [send]);
 
   const modal =
-    state.modelSelect ? (
+    state.helpCommands ? (
+      <HelpModal
+        commands={state.helpCommands}
+        width={popupWidth}
+        rows={calculateHelpModalRows(terminalHeight, popupTop)}
+        onClose={() => send({ type: "help_closed" }, "help")}
+      />
+    ) : state.modelSelect ? (
       <SelectionModal<ModelOption>
         title={state.modelSelect.title}
         subtitle={state.modelSelect.subtitle}
         options={state.modelSelect.options}
+        width={Math.min(72, Math.max(30, terminalWidth - 4))}
         onSelect={(name) => send({ type: "model_selected", name }, "model")}
       />
     ) : state.providerSelect ? (
@@ -2179,6 +2435,7 @@ export default function App() {
         title={state.providerSelect.title}
         subtitle={state.providerSelect.subtitle}
         options={state.providerSelect.options}
+        width={Math.min(72, Math.max(30, terminalWidth - 4))}
         onSelect={(name) => send({ type: "provider_selected", name }, "provider")}
       />
     ) : state.skillSelect ? (
@@ -2186,6 +2443,7 @@ export default function App() {
         title={state.skillSelect.title}
         subtitle={state.skillSelect.subtitle}
         options={state.skillSelect.options}
+        width={Math.min(72, Math.max(30, terminalWidth - 4))}
         onSelect={(name) => send({ type: "skill_selected", name }, "skill")}
       />
     ) : state.questionSession ? (
@@ -2200,7 +2458,6 @@ export default function App() {
       />
     ) : null;
   const modalActive = Boolean(modal);
-
   useInput((input, key) => {
     if (modal) return;
     if (!state.isGenerating || state.inputActive) return;
@@ -2220,7 +2477,6 @@ export default function App() {
       width={workerPaneLayout.transcriptWidth}
     />
   ) : null;
-
   const workerPanes = hasWorkers ? (
     <WorkerPanes
       workers={workers}
@@ -2234,25 +2490,32 @@ export default function App() {
   ) : null;
 
   return (
-    <Box flexDirection="column" width={terminalWidth} height={terminalHeight}>
+    <Box position="relative" flexDirection="column" width={terminalWidth} height={terminalHeight}>
       {state.showIntro ? (
         <>
-          {state.banner ? (
-            <Banner logo={state.banner.logo} subtitle={state.banner.subtitle} width={terminalWidth} />
-          ) : null}
-          <StatusCards
-            cwd={state.status.cwd}
-            commands={state.commands}
-            transcriptItems={transcriptItems}
-            width={terminalWidth}
-          />
+          {state.banner && shouldUseWideBanner(terminalWidth) ? (
+            <WelcomePanel
+              cwd={state.status.cwd}
+              commands={state.commands}
+              model={state.status.model}
+              width={terminalWidth}
+            />
+          ) : (
+            <>
+              {state.banner ? (
+                <Banner logo={state.banner.logo} subtitle={state.banner.subtitle} width={terminalWidth} />
+              ) : null}
+              <StatusCards
+                cwd={state.status.cwd}
+                commands={state.commands}
+                transcriptItems={transcriptItems}
+                width={terminalWidth}
+              />
+            </>
+          )}
         </>
       ) : null}
-      {modalActive ? (
-        <Box flexGrow={1} justifyContent="center" paddingX={1}>
-          {modal}
-        </Box>
-      ) : workerPaneLayout.placement === "side" && workerPanes ? (
+      {workerPaneLayout.placement === "side" && workerPanes ? (
         <Box flexDirection="row" height={sideBySideHeight}>
           <Box width={workerPaneLayout.transcriptWidth}>{transcriptView}</Box>
           {workerPanes}
@@ -2263,23 +2526,30 @@ export default function App() {
           {workerPanes}
         </>
       )}
-      {!modalActive ? todoPanel : null}
-      {!modalActive ? (
-        <InputPanel
-          active={state.inputActive}
+      {todoPanel}
+      <Box flexGrow={1} />
+      <MemoInputPanel
+          active={state.inputActive && !modalActive}
           commands={state.commands}
           connectionError={state.connectionError}
           isGenerating={state.isGenerating}
-          cwd={state.status.cwd}
           model={state.status.model}
           contextPercent={state.status.contextPercent}
-          width={terminalWidth}
-          onSubmit={(value) => send({ type: "input", content: value })}
-          onInterrupt={() => send({ type: "interrupt" })}
-          onCopyLast={() => send({ type: "copy_last_response" })}
-        />
+          onSubmit={submitInput}
+          onInterrupt={interrupt}
+          onCopyLast={copyLastResponse}
+      />
+      {modalActive ? (
+        <Box
+          position="absolute"
+          marginTop={popupTop}
+          marginLeft={popupLeft}
+          width={popupWidth}
+          flexDirection="column"
+        >
+          {modal}
+        </Box>
       ) : null}
-      <Box flexGrow={1} />
     </Box>
   );
 }

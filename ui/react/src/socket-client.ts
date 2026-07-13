@@ -38,8 +38,15 @@ export class SocketClient {
       this.buffer += chunk;
       const { messages, remainder } = parseJsonLines(this.buffer);
       this.buffer = remainder;
-      for (const message of messages) {
-        this.handlers.onMessage(message);
+      if (messages.length === 1) {
+        this.handlers.onMessage(messages[0]);
+      } else if (messages.length > 1) {
+        this.handlers.onMessage({
+          type: "event_batch",
+          events: messages.flatMap((message) =>
+            message.type === "event_batch" ? message.events : [message],
+          ),
+        });
       }
     });
 

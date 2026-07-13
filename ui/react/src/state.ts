@@ -98,18 +98,17 @@ export interface TodoItem {
 }
 
 export interface AppState {
-  connected: boolean;
   connectionError: string | null;
   banner: { logo: string[]; subtitle?: string } | null;
   showIntro: boolean;
   status: StatusState;
   commands: CommandOption[];
+  helpCommands: CommandOption[] | null;
   transcript: TranscriptState;
   workers: WorkerState[];
   inputActive: boolean;
   isGenerating: boolean;
   streams: Record<string, string>;
-  completedStreams: Record<string, string>;
   todos: TodoItem[];
   modelSelect: SelectionState<ModelOption> | null;
   providerSelect: SelectionState<ProviderOption> | null;
@@ -119,18 +118,17 @@ export interface AppState {
 }
 
 export const initialState: AppState = {
-  connected: false,
   connectionError: null,
   banner: null,
   showIntro: true,
   status: { cwd: "", model: "", contextPercent: 0 },
   commands: [],
+  helpCommands: null,
   transcript: { order: [], byId: {}, overflowCount: 0 },
   workers: [],
   inputActive: false,
   isGenerating: false,
   streams: {},
-  completedStreams: {},
   todos: [],
   modelSelect: null,
   providerSelect: null,
@@ -140,19 +138,13 @@ export const initialState: AppState = {
 };
 
 type Action =
-  | { type: "connected" }
-  | { type: "disconnected" }
   | { type: "connection_error"; error: string }
   | { type: "bridge"; message: InboundEnvelope }
   | { type: "input_sent" }
-  | { type: "selection_closed"; selection: "model" | "provider" | "skill" | "apiKey" | "question" };
+  | { type: "selection_closed"; selection: "model" | "provider" | "skill" | "apiKey" | "question" | "help" };
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
-    case "connected":
-      return { ...state, connected: true, connectionError: null };
-    case "disconnected":
-      return { ...state, connected: false };
     case "connection_error":
       return { ...state, connectionError: action.error };
     case "input_sent":
@@ -206,8 +198,9 @@ export function selectWorkerActivity(state: AppState, workerId: string): WorkerA
 
 function closeSelection(
   state: AppState,
-  selection: "model" | "provider" | "skill" | "apiKey" | "question",
+  selection: "model" | "provider" | "skill" | "apiKey" | "question" | "help",
 ): AppState {
+  if (selection === "help") return { ...state, helpCommands: null };
   if (selection === "model") return { ...state, modelSelect: null };
   if (selection === "provider") return { ...state, providerSelect: null };
   if (selection === "skill") return { ...state, skillSelect: null };
@@ -220,10 +213,30 @@ function applyEnvelope(state: AppState, envelope: InboundEnvelope): AppState {
     return applyInbound(state, envelope);
   }
 
-  return envelope.events.reduce(
+  return coalesceStreamChunks(envelope.events).reduce(
     (nextState, message) => applyInbound(nextState, message),
     state,
   );
+}
+
+function coalesceStreamChunks(events: InboundMessage[]): InboundMessage[] {
+  const coalesced: InboundMessage[] = [];
+  for (const event of events) {
+    const previous = coalesced[coalesced.length - 1];
+    if (
+      event.type === "stream_chunk" &&
+      previous?.type === "stream_chunk" &&
+      previous.itemId === event.itemId
+    ) {
+      coalesced[coalesced.length - 1] = {
+        ...previous,
+        content: previous.content + event.content,
+      };
+    } else {
+      coalesced.push(event);
+    }
+  }
+  return coalesced;
 }
 
 function createTranscriptItem(
@@ -243,7 +256,7 @@ function appendTranscript(state: AppState, item: TranscriptItem): AppState {
     return state;
   }
 
-  const order = state.transcript.order.includes(item.id)
+  const order = state.transcript.byId[item.id]
     ? state.transcript.order
     : [...state.transcript.order, item.id];
   const transcript = trimTranscript({
@@ -407,6 +420,8 @@ function applyInbound(state: AppState, message: InboundMessage): AppState {
       return { ...state, banner: { logo: message.logo, subtitle: message.subtitle } };
     case "command_list":
       return { ...state, commands: message.commands };
+    case "help":
+      return { ...state, helpCommands: message.commands, inputActive: false };
     case "status":
       return updateStatus(state, message);
     case "input_request":
@@ -449,8 +464,6 @@ function applyInbound(state: AppState, message: InboundMessage): AppState {
       return openQuestionSession(state, message.questions);
     case "api_key_request":
       return { ...state, inputActive: false, apiKeyPrompt: { provider: message.provider } };
-    case "mode_switch":
-      return appendModeSwitch(state, message.mode, message.note);
     case "todo_list":
       return { ...state, todos: message.items as TodoItem[] };
     case "clear":
@@ -492,7 +505,8 @@ function appendResponse(
   state: AppState,
   message: Extract<InboundMessage, { type: "response" }>,
 ): AppState {
-  if (state.completedStreams[message.id ?? ""] === message.content) {
+  const existing = message.id ? state.transcript.byId[message.id] : undefined;
+  if (existing?.kind === "response" && existing.body === message.content) {
     return { ...state, isGenerating: false };
   }
 
@@ -568,7 +582,7 @@ function appendToolCall(
       message.id ?? `tool-call-${state.transcript.order.length + 1}`,
       "tool_call",
       JSON.stringify(message.args, null, 2),
-      message.label || message.toolName,
+      message.toolName,
       "tool",
       undefined,
       message.collapsible,
@@ -606,10 +620,8 @@ function appendStreamChunk(state: AppState, itemId: string, content: string): Ap
 
 function finishStream(state: AppState, itemId: string, content: string): AppState {
   const { [itemId]: _finishedStream, ...streams } = state.streams;
-  const completedStreams = { ...state.completedStreams, [itemId]: content };
-
   return appendTranscript(
-    { ...state, streams, completedStreams, isGenerating: false },
+    { ...state, streams, isGenerating: false },
     createTranscriptItem(itemId, "response", content, "assistant", "assistant"),
   );
 }
@@ -766,25 +778,11 @@ function openQuestionSession(state: AppState, questions: GuidedQuestion[]): AppS
   };
 }
 
-function appendModeSwitch(state: AppState, mode: string, note?: string): AppState {
-  return appendTranscript(
-    state,
-    createTranscriptItem(
-      `mode-${state.transcript.order.length + 1}`,
-      "mode",
-      note ? `Switched to ${mode} mode.\n${note}` : `Switched to ${mode} mode.`,
-      "mode",
-      "muted",
-    ),
-  );
-}
-
 function clearTimeline(state: AppState): AppState {
   return {
     ...state,
     transcript: { order: [], byId: {}, overflowCount: 0 },
     streams: {},
-    completedStreams: {},
     workers: [],
     todos: [],
     isGenerating: false,
