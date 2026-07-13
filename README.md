@@ -2,7 +2,7 @@
 
 > An AI coding agent that works with you directly in the terminal.
 
-![Terminus CLI](assets/image.png)
+![Terminus CLI](assets/terminus-cli.png)
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![React](https://img.shields.io/badge/UI-React%20%2B%20Ink-61DAFB?logo=react&logoColor=black)](https://github.com/vadimdemedes/ink)
