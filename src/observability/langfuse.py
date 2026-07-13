@@ -1,4 +1,5 @@
 import atexit
+import importlib.util
 import os
 import ssl
 from dotenv import load_dotenv
@@ -6,6 +7,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _langfuse_client = None
+
+
+def is_available() -> bool:
+    """Return whether the optional Langfuse SDK is installed."""
+    return importlib.util.find_spec("langfuse") is not None
 
 def _should_verify_ssl() -> bool:
     """Return True unless LANGFUSE_VERIFY_SSL is explicitly set to 'false'."""
@@ -37,10 +43,13 @@ def get_langfuse_client():
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
     host = os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
 
-    if not public_key or not secret_key:
+    if not public_key or not secret_key or not is_available():
         return None
 
-    from langfuse import Langfuse
+    try:
+        from langfuse import Langfuse
+    except ImportError:
+        return None
 
     kwargs = dict(
         public_key=public_key,
@@ -51,13 +60,21 @@ def get_langfuse_client():
     if not _should_verify_ssl():
         kwargs["httpx_client"] = None
 
-    _langfuse_client = Langfuse(**kwargs)
+    try:
+        _langfuse_client = Langfuse(**kwargs)
+    except Exception:
+        # Observability must never prevent the CLI from starting or running.
+        return None
     return _langfuse_client
 
 
 def is_enabled():
-    """Check if Langfuse tracing is configured."""
-    return bool(os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY"))
+    """Check if the optional SDK is installed and tracing is configured."""
+    return bool(
+        is_available()
+        and os.environ.get("LANGFUSE_PUBLIC_KEY")
+        and os.environ.get("LANGFUSE_SECRET_KEY")
+    )
 
 
 def flush():
@@ -119,5 +136,10 @@ def observe(name=None, as_type=None):
             return fn
         return noop_decorator
 
-    from langfuse.decorators import observe as _observe
+    try:
+        from langfuse.decorators import observe as _observe
+    except ImportError:
+        def noop_decorator(fn):
+            return fn
+        return noop_decorator
     return _observe(name=name, as_type=as_type)
