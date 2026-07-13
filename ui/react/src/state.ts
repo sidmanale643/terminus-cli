@@ -141,6 +141,7 @@ type Action =
   | { type: "connection_error"; error: string }
   | { type: "bridge"; message: InboundEnvelope }
   | { type: "input_sent" }
+  | { type: "transcript_scroll_position"; atTop: boolean }
   | { type: "selection_closed"; selection: "model" | "provider" | "skill" | "apiKey" | "question" | "help" };
 
 export function reducer(state: AppState, action: Action): AppState {
@@ -148,7 +149,9 @@ export function reducer(state: AppState, action: Action): AppState {
     case "connection_error":
       return { ...state, connectionError: action.error };
     case "input_sent":
-      return { ...state, inputActive: false, isGenerating: true, showIntro: false };
+      return { ...state, inputActive: false, isGenerating: true };
+    case "transcript_scroll_position":
+      return { ...state, showIntro: action.atTop };
     case "selection_closed":
       return closeSelection(state, action.selection);
     case "bridge":

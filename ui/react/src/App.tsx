@@ -45,6 +45,7 @@ import {
   applyScrollAction,
   createViewportWindow,
   keepScrollPositionAfterRowChange,
+  maxScrollOffset,
   nextSmoothScrollOffset,
   visibleOptionRange,
   wrapTextToRows,
@@ -59,21 +60,21 @@ import {
 } from "./worker-view.js";
 
 const COLORS = {
-  background: "#09070D", // Obsidian
-  panel: "#181320", // Ink violet
-  border: "#3B3048",
-  borderHover: "#8067A6",
-  text: "#F5F1FA", // Platinum
-  dim: "#B9B0C5",
-  muted: "#786E86",
-  accent: "#A98BEF", // Amethyst
-  accentSoft: "#D2B9FF", // Pale orchid
-  danger: "#FF6F91",
-  success: "#E2C66D", // Antique gold
-  info: "#91A7F2", // Periwinkle
-  warning: "#E7B85C",
-  shadow: "#050407",
-  bannerGradient: ["#D8C6FF", "#C5ACFA", "#B295F3", "#9F83E5", "#8D76CE", "#7B69B6"],
+  background: "#17191A", // Carbon
+  panel: "#202325", // Gunmetal
+  border: "#555B5E",
+  borderHover: "#BCC2C5",
+  text: "#D9DDDF", // Aluminum white
+  dim: "#BCC2C5", // Aluminum
+  muted: "#7F878B",
+  accent: "#E2382A", // Signal red
+  accentSoft: "#FF766A",
+  danger: "#FF5A4D",
+  success: "#75B798",
+  info: "#BCC2C5",
+  warning: "#D9A441",
+  shadow: "#0D0F10",
+  bannerGradient: ["#FF766A", "#F65F52", "#ED493D", "#E2382A", "#C92E23", "#A9251D"],
 };
 
 const WIDE_BANNER_MIN_WIDTH = 78;
@@ -83,9 +84,11 @@ const HERO_SECTION_ROWS = 0;
 const STATUS_CARDS_ROWS = 5;
 const WELCOME_IDENTITY_WIDTH = 48;
 const TERMINUS_WORDMARK = [
-  "╺┳╸┏━╸┏━┓┏┳┓╻┏┓╻╻ ╻┏━┓",
-  " ┃ ┣╸ ┣┳┛┃┃┃┃┃┗┫┃ ┃┗━┓",
-  " ╹ ┗━╸╹┗╸╹ ╹╹╹ ╹┗━┛┗━┛",
+  "╺━┳━╸ ┏━━╸ ┏━━┓ ┏┓ ┏┓ ┏━┓ ┏┓ ╻ ╻ ╻ ┏━━┓",
+  "  ┃   ┃    ┃  ┃ ┃┗┳┛┃  ┃  ┃┗┓┃ ┃ ┃ ┃   ",
+  "  ┃   ┣━╸  ┣━┳┛ ┃ ┃ ┃  ┃  ┃ ┗┫ ┃ ┃ ┗━━┓",
+  "  ┃   ┃    ┃ ┗╸ ┃   ┃  ┃  ┃  ┃ ┃ ┃    ┃",
+  "  ╹   ┗━━╸ ╹  ╹ ╹   ╹ ┗━┛ ╹  ╹ ┗━┛ ┗━━┛",
 ];
 const COMPACT_LABEL_LENGTH = 18;
 const COMPACT_BODY_LENGTH = 52;
@@ -903,7 +906,11 @@ function scrollActionFromKey(key: {
   return null;
 }
 
-function useSmoothScrollOffset(totalRows: number, viewportRows: number) {
+function useSmoothScrollOffset(
+  totalRows: number,
+  viewportRows: number,
+  onScrollPositionChange?: (atTop: boolean) => void,
+) {
   const [scrollOffset, setScrollOffset] = useState(0);
   const targetOffset = useRef(0);
   const previousTotalRows = useRef(0);
@@ -945,6 +952,9 @@ function useSmoothScrollOffset(totalRows: number, viewportRows: number) {
     );
     if (nextTarget === targetOffset.current) return;
     targetOffset.current = nextTarget;
+    onScrollPositionChange?.(
+      nextTarget === maxScrollOffset(totalRowsRef.current, viewportRowsRef.current),
+    );
     animateTowardTarget();
   };
 
@@ -980,6 +990,7 @@ function Transcript({
   top,
   left,
   width,
+  onScrollPositionChange,
 }: {
   lines: TranscriptDisplayLine[];
   setExpandedIds: Dispatch<SetStateAction<Record<string, boolean>>>;
@@ -988,9 +999,14 @@ function Transcript({
   top: number;
   left: number;
   width: number;
+  onScrollPositionChange?: (atTop: boolean) => void;
 }) {
   const contentRows = Math.max(1, height - TRANSCRIPT_CHROME_ROWS);
-  const { scrollOffset, moveByAction } = useSmoothScrollOffset(lines.length, contentRows);
+  const { scrollOffset, moveByAction } = useSmoothScrollOffset(
+    lines.length,
+    contentRows,
+    onScrollPositionChange,
+  );
   const viewport = createViewportWindow(lines, contentRows, scrollOffset);
   const visibleLines = viewport.lines;
   const hitAreas = buildTranscriptHitAreas(visibleLines);
@@ -1516,7 +1532,6 @@ function WelcomePanel({
           {TERMINUS_WORDMARK.map((line) => (
             <Text key={line} color={COLORS.accent} bold>{line}</Text>
           ))}
-          <Text color={COLORS.muted}>AI development companion</Text>
         </Box>
         <Box flexDirection="column">
           <Text color={COLORS.text} bold>Ready to build.  <Text color={COLORS.muted}>{workspace}</Text></Text>
@@ -1540,7 +1555,7 @@ function WelcomePanel({
           )) : <Text color={COLORS.dim}>F1 opens the command index</Text>}
         </Box>
         <Text color={COLORS.muted} wrap="truncate">
-          {modelLabel}   ·   F1 commands   ·   Ctrl+C stop   ·   Ctrl+Y copy
+          {modelLabel}   ·   Inspect. Build. Verify.
         </Text>
       </Box>
     </Box>
@@ -2413,6 +2428,10 @@ export default function App() {
   const submitInput = useCallback((value: string) => send({ type: "input", content: value }), [send]);
   const interrupt = useCallback(() => send({ type: "interrupt" }), [send]);
   const copyLastResponse = useCallback(() => send({ type: "copy_last_response" }), [send]);
+  const updateIntroForScrollPosition = useCallback(
+    (atTop: boolean) => dispatch({ type: "transcript_scroll_position", atTop }),
+    [],
+  );
 
   const modal =
     state.helpCommands ? (
@@ -2475,6 +2494,7 @@ export default function App() {
       top={transcriptTop}
       left={transcriptLeft}
       width={workerPaneLayout.transcriptWidth}
+      onScrollPositionChange={updateIntroForScrollPosition}
     />
   ) : null;
   const workerPanes = hasWorkers ? (
