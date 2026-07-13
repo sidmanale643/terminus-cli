@@ -1,4 +1,5 @@
 import os
+import heapq
 import subprocess
 from textwrap import dedent
 
@@ -64,32 +65,39 @@ class Glob(ToolSchema):
             return limit_value
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 ["rg", "--files", "--glob", pattern, search_path],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                check=False,
+                errors="replace",
             )
         except FileNotFoundError:
             return "Error: ripgrep (rg) not found. Please install ripgrep: https://github.com/BurntSushi/ripgrep"
         except Exception as exc:
             return f"Error executing glob search: {exc}"
 
-        if result.returncode == 1:
-            return "No files found."
-        if result.returncode != 0:
-            return f"Error: {result.stderr.strip() or 'Unknown error'}"
+        newest = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            candidate = os.path.abspath(line.strip())
+            if not candidate:
+                continue
+            item = (self._modified_time(candidate), candidate)
+            if len(newest) < limit_value:
+                heapq.heappush(newest, item)
+            elif item > newest[0]:
+                heapq.heapreplace(newest, item)
+        stderr = process.stderr.read() if process.stderr else ""
+        returncode = process.wait()
 
-        matches = [
-            os.path.abspath(line.strip())
-            for line in result.stdout.splitlines()
-            if line.strip()
-        ]
-        if not matches:
+        if returncode == 1:
             return "No files found."
-
-        matches.sort(key=self._modified_time, reverse=True)
-        return "\n".join(matches[:limit_value])
+        if returncode != 0:
+            return f"Error: {stderr.strip() or 'Unknown error'}"
+        if not newest:
+            return "No files found."
+        return "\n".join(path for _, path in sorted(newest, reverse=True))
 
     def _resolve_path(self, path: str | None) -> str:
         search_path = os.path.expanduser(path or ".")

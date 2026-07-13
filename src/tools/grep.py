@@ -3,6 +3,8 @@ from textwrap import dedent
 from src.models.tool import ToolSchema
 
 class Grep(ToolSchema):
+    MAX_RESULTS = 1000
+    MAX_OUTPUT_BYTES = 1_000_000
     def __init__(self):
         self.name = "grep_search"
     
@@ -64,13 +66,32 @@ class Grep(ToolSchema):
         
         # Execute the command
         try:
-            result = subprocess.run(query_parts, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                return result.stdout if result.stdout else "No matches found."
-            elif result.returncode == 1:
+            process = subprocess.Popen(
+                query_parts,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+            )
+            lines = []
+            output_bytes = 0
+            assert process.stdout is not None
+            for line in process.stdout:
+                encoded_size = len(line.encode("utf-8"))
+                if len(lines) >= self.MAX_RESULTS or output_bytes + encoded_size > self.MAX_OUTPUT_BYTES:
+                    process.terminate()
+                    lines.append("[output truncated: result limit reached]\n")
+                    break
+                lines.append(line)
+                output_bytes += encoded_size
+            stderr = process.stderr.read() if process.stderr else ""
+            returncode = process.wait()
+
+            if lines:
+                return "".join(lines)
+            elif returncode == 1:
                 return "No matches found."
             else:
-                return f"Error: {result.stderr if result.stderr else 'Unknown error'}"
+                return f"Error: {stderr or 'Unknown error'}"
         except FileNotFoundError:
             return "Error: ripgrep (rg) not found. Please install ripgrep: https://github.com/BurntSushi/ripgrep"
