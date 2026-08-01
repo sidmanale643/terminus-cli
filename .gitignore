@@ -10,9 +10,6 @@ wheels/
 .venv
 .ruff_cache
 
-# Database
-.db/
-
 # Environment / secrets
 .env
 

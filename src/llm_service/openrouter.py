@@ -5,7 +5,9 @@ from src.utils import parse_tool_calls
 from src.llm_service.base_class import LlmProvider
 
 from dotenv import load_dotenv
+import os
 
+load_dotenv(os.path.expanduser("~/.terminus/.env"))
 load_dotenv()
 
 class OpenRouterProvider(LlmProvider):
@@ -50,7 +52,7 @@ class OpenRouterProvider(LlmProvider):
             request_params["parallel_tool_calls"] = True
         return request_params
 
-    def _parse_response(self, response, temperature: float, trace_generation=None) -> Response:
+    def _parse_response(self, response, temperature: float) -> Response:
         choice = response.choices[0].message
         content = getattr(choice, "content", "") or ""
         reasoning_text = getattr(choice, "reasoning", None)
@@ -74,19 +76,6 @@ class OpenRouterProvider(LlmProvider):
         if cost is not None:
             print(f"Cost: {cost}")
 
-        if trace_generation:
-            end_kwargs = {
-                "output": content,
-                "usage": {
-                    "input": prompt_tokens,
-                    "output": completion_tokens,
-                    "total": total_tokens,
-                },
-            }
-            if cost is not None:
-                end_kwargs["cost_details"] = {"total": cost}
-            trace_generation.end(**end_kwargs)
-
         return Response(
             content=content,
             tool_calls=tool_calls,
@@ -103,32 +92,21 @@ class OpenRouterProvider(LlmProvider):
         messages: List[Dict],
         tools: Optional[List[Dict]] = None,
         tool_choice: str = "auto",
-        model_name: str = "minimax/minimax-m2.5:free",
+        model_name: str = "deepseek/deepseek-v4-flash-0731",
         temperature: float = 0.3,
-        trace=None,
         provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """
         Makes a request to OpenRouter API with optional reasoning capabilities.
         """
-        generation = None
-        if trace:
-            generation = trace.generation(
-                name="openrouter-completion",
-                model=model_name,
-                input=messages,
-                metadata={"provider": "openrouter", "temperature": temperature},
-            )
         try:
             client = self._client()
             request_params = self._build_request_params(
                 messages, tools, tool_choice, model_name, temperature, provider_routing
             )
             response = client.chat.completions.create(**request_params)
-            return self._parse_response(response, temperature, generation)
+            return self._parse_response(response, temperature)
         except Exception as e:
-            if generation:
-                generation.end(level="ERROR", status_message=str(e))
             raise Exception(f"Error in OpenRouterProvider: {type(e).__name__}: {e}")
 
     async def agenerate(
@@ -136,30 +114,19 @@ class OpenRouterProvider(LlmProvider):
         messages: List[Dict],
         tools: Optional[List[Dict]] = None,
         tool_choice: str = "auto",
-        model_name: str = "minimax/minimax-m2.5:free",
+        model_name: str = "deepseek/deepseek-v4-flash-0731",
         temperature: float = 0.3,
-        trace=None,
         provider_routing: Optional[List[str]] = None,
     ) -> Response:
         """Async generate using AsyncOpenAI."""
-        generation = None
-        if trace:
-            generation = trace.generation(
-                name="openrouter-completion-async",
-                model=model_name,
-                input=messages,
-                metadata={"provider": "openrouter", "temperature": temperature},
-            )
         try:
             client = self._async_client()
             request_params = self._build_request_params(
                 messages, tools, tool_choice, model_name, temperature, provider_routing
             )
             response = await client.chat.completions.create(**request_params)
-            return self._parse_response(response, temperature, generation)
+            return self._parse_response(response, temperature)
         except Exception as e:
-            if generation:
-                generation.end(level="ERROR", status_message=str(e))
             raise Exception(f"Error in OpenRouterProvider async: {type(e).__name__}: {e}")
 
     def stream(
@@ -167,7 +134,7 @@ class OpenRouterProvider(LlmProvider):
         messages: List[Dict],
         tools: Optional[List[Dict]] = None,
         tool_choice: str = "auto",
-        model_name: str = "minimax/minimax-m2.5:free",
+        model_name: str = "deepseek/deepseek-v4-flash-0731",
         temperature: float = 0.3,
         stream: bool = True,
         provider_routing: Optional[List[str]] = None,

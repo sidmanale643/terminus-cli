@@ -31,24 +31,41 @@ class Bash(ToolSchema):
         - Do NOT run npm install, pip install, uv add, or any package installation without explicit user confirmation.
         - Do NOT run any command that could harm the user's system or data.
 
+        This is the only tool for browsing the filesystem and searching code.
+        There are no separate grep/glob/ls tools — use bash for those operations:
+
+        Searching code (use ripgrep, it respects .gitignore and is fastest on large trees):
+        - rg --line-number --no-heading --color=never '<pattern>' <path>
+        - Restrict to matching files with --glob, e.g. rg --line-number '<pattern>' --glob '*.py' <path>
+        - Pipe large results through head, e.g. rg --line-number '<pattern>' <path> | head -50
+
+        Finding files by name or glob pattern:
+        - rg --files --glob '<pattern>' <path>   (respects .gitignore)
+        - Or shell globbing: shopt -s globstar; ls <path>/**/*.py
+        - Or find <path> -name '*.py' when you need more control
+
+        Listing a directory:
+        - ls -la <path>
+
         For file edits, use the dedicated file_editor tool instead of sed/awk/perl.
         For reading files, use the file_reader tool instead of cat/head/tail.
-        For searching code, use the grep_search tool instead of grep/rg.
 
         Safety notes:
-        - Commands run with a configurable timeout.
-        - Prefer dedicated tools for reading files, listing directories, and search.
+        - Commands run with a configurable timeout (default 30s, max 120s).
+        - Pipe long-running or verbose commands through head when you only need a preview.
 
         Supported examples:
         - pwd
         - git status
         - git diff
         - git log --oneline -5
+        - rg --line-number --no-heading 'def run' src/
+        - rg --files --glob '*.py' rich_ui/ | head -20
+        - ls -la
         - echo hello | tr a-z A-Z
         - python3 -m py_compile src/main.py
         - ruff check src/
         - npm run build
-        - cat file.txt | grep pattern
         """)
 
     def json_schema(self) -> Dict[str, Any]:

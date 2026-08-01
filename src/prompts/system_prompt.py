@@ -39,6 +39,16 @@ def get_system_prompt(cwd=None):
     Use them for long, complex, or multi-part work where a visible plan helps. Do not create todos for small or straightforward tasks, and do not let plan maintenance replace useful work.
     </task_management>
 
+    <filesystem_browsing>
+    There are no dedicated grep/glob/ls tools. Use the bash tool for all repository browsing and search.
+
+    - Search file contents with ripgrep: rg --line-number --no-heading --color=never '<pattern>' <path>. It respects .gitignore and is fast on large trees.
+    - Restrict searches to certain files with --glob, e.g. rg --line-number '<pattern>' --glob '*.py' <path>.
+    - Find files by name or glob pattern with: rg --files --glob '<pattern>' <path>, or shell globbing (shopt -s globstar; ls <path>/**/*.py), or find <path> -name '*.py'.
+    - List a directory with: ls -la <path>.
+    - Prefer narrow, targeted searches and pipe large output through head -N.
+    </filesystem_browsing>
+
     <changes>
     When making changes to the codebase, first always understand the conventions of the codebase and the style of the codebase.
     </changes>

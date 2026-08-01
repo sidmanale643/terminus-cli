@@ -9,17 +9,13 @@ description = "AI-powered development companion for the command line"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "groq>=0.33.0",
     "openai>=2.6.1",
     "pydantic>=2.12.3",
     "pyyaml>=6.0.0",
     "python-dotenv>=1.2.1",
-    "mcp>=1.0.0",
     "daytona>=0.175.0",
+    "rich>=13.7.0",
 ]
-
-[project.optional-dependencies]
-langfuse = ["langfuse>=2.60.0,<3"]
 
 [dependency-groups]
 dev = ["ruff>=0.14.2"]
@@ -29,15 +25,4 @@ terminus = "src.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "ui*"]
-
-[tool.setuptools.package-data]
-"ui" = ["react/**/*"]
-
-[tool.setuptools.exclude-package-data]
-"ui" = [
-    "react/node_modules/**",
-    "react/src/*.test.ts",
-    "react/src/*.test.tsx",
-    "react/dist/*.test.js",
-]
+include = ["src*", "ui*", "rich_ui*"]

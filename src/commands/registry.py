@@ -55,7 +55,6 @@ class CommandRegistry:
 
 
 CommandRegistry.register("/help", "Show the command reference")
-CommandRegistry.register("/plan", "Create an implementation plan", "/plan <task>")
 CommandRegistry.register("/context", "View current conversation context")
 CommandRegistry.register("/history", "View recent session history")
 CommandRegistry.register("/reset", "Reset session history")
@@ -68,5 +67,4 @@ CommandRegistry.register("/skills", "List available skills")
 CommandRegistry.register("/skill", "Choose or load a skill by name", "/skill [name]")
 CommandRegistry.register("/connect", "Select provider and configure API key")
 CommandRegistry.register("/init", "Generate or update AGENTS.md")
-CommandRegistry.register("/mcp", "Manage MCP servers and tools", "/mcp [status|refresh|tools]")
 CommandRegistry.register("/exit", "Exit the program", aliases=["exit", "quit", "q"])

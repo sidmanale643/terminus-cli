@@ -1,10 +1,8 @@
-DEFAULT_DATABASE_DIR = ".db/"
+import os
 
-DEFAULT_GEMINI_MODEL = "google/gemini-2.5-flash"
-DEFAULT_OPEN_ROUTER_MODEL = "deepseek/deepseek-v4-flash:free"
-DEFAULT_GROQ_MODEL = "moonshotai/kimi-k2-instruct-0905"
+TERMINUS_DIR = os.path.expanduser("~/.terminus")
+DEFAULT_DATABASE_DIR = TERMINUS_DIR
+TODO_FILE = os.path.join(TERMINUS_DIR, "todos.json")
 
-DEFAULT_PROVIDER = "groq"
-DEFAULT_MODEL = "openai/gpt-oss-120b"
-
-AVAILABLE_MODELS = []
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
+DEFAULT_PROVIDER = "openrouter"

@@ -1,10 +1,9 @@
-from typing import Literal, Optional
+from typing import Optional
 from threading import Event
 from types import SimpleNamespace
 from src.models.llm import available_models
 from src.tools.tool_registry import ToolRegistry
 import json
-import sys
 import time
 from src.prompts import PromptManager
 from dotenv import load_dotenv
@@ -13,9 +12,10 @@ from src.llm_service.service import LLMService
 from src.constants import DEFAULT_PROVIDER, DEFAULT_MODEL
 from src.context_manager import ContextManager
 from src.prompts.init_prompt import get_init_prompt
-from src.observability import langfuse as lf_obs
 import os
 import re
+
+load_dotenv(os.path.expanduser("~/.terminus/.env"))
 load_dotenv()
 
 MAX_ITERATIONS = 50
@@ -41,7 +41,7 @@ class Agent:
         Initialize the Agent
 
         Args:
-            cwd: Optional working directory to use in system prompt. If None, uses os.getcwd()
+        cwd: Optional working directory to use in system prompt. If None, uses os.getcwd()
         """
         self.id = id
         self.cwd = cwd
@@ -49,13 +49,11 @@ class Agent:
         self.description = description
         self.use_streaming = use_streaming
         self._subagent_counter = 0
-        self.mode = "default"
         self.iteration = 0
         self.max_iterations = max_iterations or MAX_ITERATIONS
         self.available_models = available_models
         pm = PromptManager(cwd=cwd)
         self.system_prompt = system_prompt if system_prompt else pm.get_system_prompt()
-        self.planner_prompt = pm.get_planner_prompt()
         self.loaded_skills: dict[str, dict] = {}
 
         # Initialize LLM Service
@@ -98,16 +96,6 @@ class Agent:
     def model_context_size(self, value):
         self.context_manager.model_context_size = value
 
-    def set_mode(self, name: Literal["default", "plan"] = "default"):
-        if name == "plan":
-            self.mode = "plan"
-            if self.context:
-                self.context_manager.set_system_message(self.planner_prompt)
-        else:
-            self.mode = "default"
-            if self.context:
-                self.context_manager.set_system_message(self.system_prompt)
-
     def init(
         self,
         status_callback=None,
@@ -118,12 +106,10 @@ class Agent:
         """Generate or update AGENTS.md for the current codebase."""
         original_context = self.context.copy()
         original_iteration = self.iteration
-        original_mode = self.mode
         original_loaded_skills = self.loaded_skills.copy()
 
         self.context = []
         self.iteration = 0
-        self.mode = "default"
         self.add_system_message()
 
         prompt = get_init_prompt()
@@ -141,7 +127,6 @@ class Agent:
             # Restore the user's conversation state
             self.context = original_context
             self.iteration = original_iteration
-            self.mode = original_mode
             self.loaded_skills = original_loaded_skills
 
         if result.startswith("Error generating AGENTS.md"):
@@ -160,9 +145,7 @@ class Agent:
 
     def add_system_message(self, system_prompt: str = None):
         if system_prompt is None:
-            system_prompt = (
-                self.planner_prompt if self.mode == "plan" else self.system_prompt
-            )
+            system_prompt = self.system_prompt
         message = self.context_manager.add_message("system", system_prompt)
         self.session_manager.insert_to_session_history("system", json.dumps(message))
 
@@ -175,7 +158,9 @@ class Agent:
     @staticmethod
     def _skill_name_from_message(message: dict) -> str | None:
         content = message.get("content", "")
-        if message.get("role") != "system" or not content.startswith(SKILL_MESSAGE_PREFIX):
+        if message.get("role") != "system" or not content.startswith(
+            SKILL_MESSAGE_PREFIX
+        ):
             return None
         first_line = content.splitlines()[0]
         return first_line.removeprefix(SKILL_MESSAGE_PREFIX).strip() or None
@@ -238,7 +223,7 @@ class Agent:
         if model not in self.available_models:
             raise ValueError("Select the correct model")
         self.model = model.name
-        service_provider = "groq" if model.provider == "groq" else "openrouter"
+        service_provider = "openrouter"
         self.llm_service.set_active_provider(service_provider)
         self.llm_service.set_provider_routing(model.openrouter_provider)
         self.context_manager.model_context_size = model.context_size
@@ -346,20 +331,8 @@ class Agent:
                 return f"performing multiple edits in {filename}"
             return f"editing {filename}"
 
-        elif tool_name == "grep_search" and "pattern" in tool_args:
-            pattern = tool_args["pattern"][:30]  # Truncate long patterns
-            return f"searching for '{pattern}'"
-
-        elif tool_name == "glob" and "pattern" in tool_args:
-            pattern = tool_args["pattern"][:30]
-            return f"finding files matching '{pattern}'"
-
         elif tool_name == "bash" and "command" in tool_args:
             return "executing bash command"
-
-        elif tool_name == "ls" and "directory_path" in tool_args:
-            dir_name = tool_args["directory_path"].split("/")[-1] or "root"
-            return f"listing {dir_name}"
 
         elif tool_name == "web_search" and "query" in tool_args:
             query = tool_args["query"][:30]  # Truncate long queries
@@ -389,8 +362,6 @@ class Agent:
 
         # Fallback to generic messages
         tool_message = {
-            "grep_search": "searching",
-            "glob": "finding files",
             "file_reader": "reading",
             "bash": "executing",
             "todo_write": "writing todos",
@@ -398,31 +369,24 @@ class Agent:
             "todo_update": "updating todos",
             "file_creator": "creating file",
             "file_editor": "editing file",
-            "ls": "listing directory",
             "subagent": "delegating to sub-agent",
             "web_search": "searching the web",
         }
 
         return tool_message.get(tool_name, "calling tool")
 
-    def _tool_schemas_for_current_mode(self):
-        if self.mode == "plan":
-            return self.tool_registry.plan_tool_schemas
+    def _tool_schemas(self):
         return self.tool_registry.tool_schemas
 
-    def _run_tool_for_current_turn(self, tool_name: str, is_plan_mode: bool, **kwargs):
-        if is_plan_mode:
-            return self.tool_registry.run_plan_tool(tool_name, **kwargs)
+    def _run_tool_for_current_turn(self, tool_name: str, **kwargs):
         return self.tool_registry.run_tool(tool_name, **kwargs)
 
     def _try_complete_ask_question_turn(
         self,
         parsed_calls,
         final_tool_calls,
-        is_plan_mode: bool,
         tool_call_callback=None,
         status_callback=None,
-        trace=None,
     ) -> str | None:
         question_call = next(
             (
@@ -438,7 +402,6 @@ class Agent:
         tool_call, tool_args = question_call
         question_output = self._run_tool_for_current_turn(
             tool_call.function.name,
-            is_plan_mode,
             **tool_args,
         )
         if tool_call_callback:
@@ -448,7 +411,9 @@ class Agent:
                 args=tool_args,
             )
         elif status_callback:
-            status_callback(self.display_tool(tool_call.function.name, tool_args), is_thinking=False)
+            status_callback(
+                self.display_tool(tool_call.function.name, tool_args), is_thinking=False
+            )
 
         self.add_assistant_message(content="", tool_calls=final_tool_calls)
         for current_tool_call, _ in parsed_calls:
@@ -462,19 +427,6 @@ class Agent:
         self.add_assistant_message(question_output)
         self.update_context_size()
 
-        if is_plan_mode:
-            self.set_mode(name="default")
-        if trace:
-            try:
-                trace.update(
-                    output={
-                        "response": question_output,
-                        "iterations": self.iteration + 1,
-                        "ended_by": ASK_QUESTION_TOOL_NAME,
-                    }
-                )
-            except Exception as le:
-                print(f"[Langfuse] Failed to update trace: {le}", file=sys.stderr)
         return question_output
 
     def run(
@@ -492,10 +444,10 @@ class Agent:
         Run the agent with a user message
 
         Args:
-            user_message: The user's input message
-            status_callback: Optional callback function to update status
-            todo_display_callback: Optional callback function to display todo list updates
-            worker_event_callback: Optional callback function to emit subagent lifecycle events
+        user_message: The user's input message
+        status_callback: Optional callback function to update status
+        todo_display_callback: Optional callback function to display todo list updates
+        worker_event_callback: Optional callback function to emit subagent lifecycle events
         """
         # print(f"[RUN] Starting agent run with user message: '{user_message}'")
 
@@ -505,393 +457,299 @@ class Agent:
         if stop_event.is_set():
             raise KeyboardInterrupt()
 
-        # Check if user wants to use planning mode
-        is_plan_mode = user_message.strip().startswith("/plan")
-        if is_plan_mode:
-            self.set_mode(name="plan")
-            task = user_message.replace("/plan", "", 1).strip()
-            user_message = f"Plan this feature {task}"
-
-            # Notify user about mode switch
-            if status_callback:
-                status_callback("switched to plan mode", is_thinking=False)
-
         if not self.context:
             self.add_system_message()
-            # print("[INIT] System prompt added to context.")
+        # print("[INIT] System prompt added to context.")
 
         self.add_user_message(user_message)
         self.update_context_size()
         self.iteration = 0
 
-        # Create Langfuse trace if observability is enabled
-        lf_client = lf_obs.get_langfuse_client()
-        trace = None
-        if lf_client:
-            try:
-                trace = lf_client.trace(
-                    name="agent-run",
-                    input={"user_message": user_message, "mode": self.mode},
-                    session_id=self.session_manager.get_session_id(),
-                    metadata={
-                        "model": self.model,
-                        "provider": self.llm_service.active_provider_name,
-                        "max_iterations": self.max_iterations,
-                    },
-                )
-            except Exception as e:
-                print(f"[Langfuse] Failed to create trace: {e}", file=sys.stderr)
+        while self.iteration < self.max_iterations:
+            # print(f"[ITERATION] Iteration {self.iteration + 1}/{self.max_iterations}")
 
-        try:
-            while self.iteration < self.max_iterations:
-                # print(f"[ITERATION] Iteration {self.iteration + 1}/{self.max_iterations}")
+            if stop_event.is_set():
+                raise KeyboardInterrupt()
+
+            try:
+                # Compact context if approaching the model's limit
+                self._maybe_compact_context(status_callback=status_callback)
+
+                # Get tool schemas for LLM
+                tool_schemas = self._tool_schemas()
+
+                if self.use_streaming:
+                    accumulated_content = ""
+                    streamed_tool_calls = {}
+                    for response_chunk in self.llm_service.stream(
+                        messages=self.context,
+                        tools=tool_schemas,
+                        tool_choice="auto",
+                        model_name=self.model,
+                        temperature=0.3,
+                    ):
+                        if stop_event.is_set():
+                            raise KeyboardInterrupt()
+
+                        if response_chunk.reasoning and status_callback:
+                            status_callback(response_chunk.reasoning, is_thinking=True)
+
+                        if response_chunk.content:
+                            accumulated_content += response_chunk.content
+                            if stream_callback:
+                                stream_callback(response_chunk.content)
+
+                        for tool_call in response_chunk.tool_calls or []:
+                            index = getattr(tool_call, "index", 0)
+                            current = streamed_tool_calls.setdefault(
+                                index,
+                                {
+                                    "id": getattr(tool_call, "id", None),
+                                    "name": "",
+                                    "arguments": "",
+                                },
+                            )
+                            current["id"] = (
+                                getattr(tool_call, "id", None) or current["id"]
+                            )
+                            function = getattr(tool_call, "function", None)
+                            if function:
+                                current["name"] += getattr(function, "name", None) or ""
+                                current["arguments"] += (
+                                    getattr(function, "arguments", None) or ""
+                                )
+
+                    final_tool_calls = [
+                        SimpleNamespace(
+                            id=value["id"],
+                            function=SimpleNamespace(
+                                name=value["name"], arguments=value["arguments"]
+                            ),
+                        )
+                        for _, value in sorted(streamed_tool_calls.items())
+                    ]
+                else:
+                    response = self.llm_service.generate(
+                        messages=self.context,
+                        tools=tool_schemas,
+                        tool_choice="auto",
+                        model_name=self.model,
+                        temperature=0.3,
+                    )
+
+                    if (
+                        response.reasoning
+                        and status_callback
+                        and response.reasoning.strip()
+                    ):
+                        status_callback(response.reasoning, is_thinking=True)
+
+                    accumulated_content = response.content or ""
+                    final_tool_calls = response.tool_calls or []
 
                 if stop_event.is_set():
                     raise KeyboardInterrupt()
 
-                try:
-                    # Compact context if approaching the model's limit
-                    self._maybe_compact_context(status_callback=status_callback)
+                # print("[LLM] LLM response received.")
+            except Exception as e:
+                # print(f"[ERROR] Failed to call LLM: {e}")
+                return f"Error occurred while calling LLM due to {e}"
 
-                    # Get tool schemas for LLM
-                    tool_schemas = self._tool_schemas_for_current_mode()
+            # Check if we have tool calls
+            if final_tool_calls and len(final_tool_calls) > 0:
+                # Parse all tool arguments first
+                parsed_calls = []
+                for tool_call in final_tool_calls:
+                    try:
+                        tool_args = json.loads(tool_call.function.arguments)
+                        parsed_calls.append((tool_call, tool_args))
+                    except json.JSONDecodeError:
+                        if status_callback:
+                            status_callback(
+                                f"skipped malformed tool call: {tool_call.function.name}",
+                                is_thinking=False,
+                            )
+                        continue
 
-                    if self.use_streaming:
-                        accumulated_content = ""
-                        streamed_tool_calls = {}
-                        for response_chunk in self.llm_service.stream(
-                            messages=self.context,
-                            tools=tool_schemas,
-                            tool_choice="auto",
-                            model_name=self.model,
-                            temperature=0.3,
-                        ):
-                            if stop_event.is_set():
-                                raise KeyboardInterrupt()
+                ask_question_result = self._try_complete_ask_question_turn(
+                    parsed_calls,
+                    final_tool_calls,
+                    tool_call_callback=tool_call_callback,
+                    status_callback=status_callback,
+                )
+                if ask_question_result is not None:
+                    return ask_question_result
 
-                            if response_chunk.reasoning and status_callback:
-                                status_callback(response_chunk.reasoning, is_thinking=True)
+                # Update status for each tool call
+                for tool_call, tool_args in parsed_calls:
+                    status_message = self.display_tool(
+                        tool_call.function.name, tool_args
+                    )
+                    if tool_call_callback:
+                        tool_call_callback(
+                            tool_name=tool_call.function.name,
+                            label=status_message,
+                            args=tool_args,
+                        )
+                    elif status_callback:
+                        status_callback(status_message, is_thinking=False)
 
-                            if response_chunk.content:
-                                accumulated_content += response_chunk.content
-                                if stream_callback:
-                                    stream_callback(response_chunk.content)
+                # Execute all tools and collect outputs
+                tool_results = []
+                for tool_call, tool_args in parsed_calls:
+                    try:
+                        if stop_event.is_set():
+                            raise KeyboardInterrupt()
 
-                            for tool_call in response_chunk.tool_calls or []:
-                                index = getattr(tool_call, "index", 0)
-                                current = streamed_tool_calls.setdefault(
-                                    index,
+                        worker_id = None
+                        if tool_call.function.name == "subagent":
+                            self._subagent_counter += 1
+                            worker_id = f"subagent-{self._subagent_counter}"
+                            task_text = str(tool_args.get("task", "") or "")
+                            role = "worker"
+                            role_name = role.title()
+                            if worker_event_callback:
+                                worker_event_callback(
+                                    "worker_spawned",
                                     {
-                                        "id": getattr(tool_call, "id", None),
-                                        "name": "",
-                                        "arguments": "",
+                                        "worker_id": worker_id,
+                                        "name": role_name,
+                                        "description": task_text,
+                                        "role": role,
                                     },
                                 )
-                                current["id"] = getattr(tool_call, "id", None) or current["id"]
-                                function = getattr(tool_call, "function", None)
-                                if function:
-                                    current["name"] += getattr(function, "name", None) or ""
-                                    current["arguments"] += getattr(function, "arguments", None) or ""
 
-                        final_tool_calls = [
-                            SimpleNamespace(
-                                id=value["id"],
-                                function=SimpleNamespace(
-                                    name=value["name"], arguments=value["arguments"]
-                                ),
-                            )
-                            for _, value in sorted(streamed_tool_calls.items())
-                        ]
-                    else:
-                        response = self.llm_service.generate(
-                            messages=self.context,
-                            tools=tool_schemas,
-                            tool_choice="auto",
-                            model_name=self.model,
-                            temperature=0.3,
-                            trace=trace,
-                        )
+                            def subagent_status(message, is_thinking=False, **kwargs):
+                                if not worker_event_callback:
+                                    if status_callback:
+                                        status_callback(
+                                            message, is_thinking=is_thinking, **kwargs
+                                        )
+                                    return
+                                worker_event_callback(
+                                    "worker_detail"
+                                    if is_thinking
+                                    else "worker_notification",
+                                    {
+                                        "worker_id": worker_id,
+                                        "detail_type": "thinking"
+                                        if is_thinking
+                                        else None,
+                                        "content": message,
+                                        "status": "running",
+                                        "summary": message,
+                                        "timestamp": time.time(),
+                                    },
+                                )
 
-                        if response.reasoning and status_callback and response.reasoning.strip():
-                            status_callback(response.reasoning, is_thinking=True)
-
-                        accumulated_content = response.content or ""
-                        final_tool_calls = response.tool_calls or []
-
-                    if stop_event.is_set():
-                        raise KeyboardInterrupt()
-
-                    # print("[LLM] LLM response received.")
-                except Exception as e:
-                    # print(f"[ERROR] Failed to call LLM: {e}")
-                    if trace:
-                        try:
-                            trace.update(output={"error": str(e)})
-                        except Exception as le:
-                            print(
-                                f"[Langfuse] Failed to update trace: {le}",
-                                file=sys.stderr,
-                            )
-                    return f"Error occurred while calling LLM due to {e}"
-
-                # Check if we have tool calls
-                if final_tool_calls and len(final_tool_calls) > 0:
-                    # Parse all tool arguments first
-                    parsed_calls = []
-                    for tool_call in final_tool_calls:
-                        try:
-                            tool_args = json.loads(tool_call.function.arguments)
-                            parsed_calls.append((tool_call, tool_args))
-                        except json.JSONDecodeError:
-                            if status_callback:
-                                status_callback(f"skipped malformed tool call: {tool_call.function.name}", is_thinking=False)
-                            continue
-
-                    ask_question_result = self._try_complete_ask_question_turn(
-                        parsed_calls,
-                        final_tool_calls,
-                        is_plan_mode,
-                        tool_call_callback=tool_call_callback,
-                        status_callback=status_callback,
-                        trace=trace,
-                    )
-                    if ask_question_result is not None:
-                        return ask_question_result
-
-                    # Update status for each tool call
-                    for tool_call, tool_args in parsed_calls:
-                        status_message = self.display_tool(
-                            tool_call.function.name, tool_args
-                        )
-                        if tool_call_callback:
-                            tool_call_callback(
-                                tool_name=tool_call.function.name,
-                                label=status_message,
-                                args=tool_args,
-                            )
-                        elif status_callback:
-                            status_callback(status_message, is_thinking=False)
-
-                    # Execute all tools and collect outputs
-                    tool_results = []
-                    for tool_call, tool_args in parsed_calls:
-                        try:
-                            if stop_event.is_set():
-                                raise KeyboardInterrupt()
-
-                            # Create span for tool execution if tracing
-                            tool_span = None
-                            if trace:
-                                try:
-                                    tool_span = trace.span(
-                                        name=tool_call.function.name,
-                                        input=tool_args,
-                                    )
-                                except Exception as le:
-                                    print(
-                                        f"[Langfuse] Failed to create tool span: {le}",
-                                        file=sys.stderr,
-                                    )
-
-                            worker_id = None
-                            if tool_call.function.name == "subagent" and not is_plan_mode:
-                                self._subagent_counter += 1
-                                worker_id = f"subagent-{self._subagent_counter}"
+                            def subagent_tool_call(tool_name, label, args):
                                 if worker_event_callback:
                                     worker_event_callback(
-                                        "worker_spawned",
+                                        "worker_detail",
                                         {
                                             "worker_id": worker_id,
-                                            "name": worker_id,
-                                            "description": tool_args.get("task", ""),
-                                            "role": "subagent",
-                                        },
-                                    )
-
-                                def subagent_status(message, is_thinking=False, **kwargs):
-                                    if not worker_event_callback:
-                                        if status_callback:
-                                            status_callback(message, is_thinking=is_thinking, **kwargs)
-                                        return
-                                    worker_event_callback(
-                                        "worker_detail" if is_thinking else "worker_notification",
-                                        {
-                                            "worker_id": worker_id,
-                                            "detail_type": "thinking" if is_thinking else None,
-                                            "content": message,
-                                            "status": "running",
-                                            "summary": message,
+                                            "detail_type": "tool_call",
+                                            "content": label,
+                                            "tool_name": tool_name,
+                                            "args": args,
                                             "timestamp": time.time(),
                                         },
                                     )
 
-                                def subagent_tool_call(tool_name, label, args):
-                                    if worker_event_callback:
-                                        worker_event_callback(
-                                            "worker_detail",
-                                            {
-                                                "worker_id": worker_id,
-                                                "detail_type": "tool_call",
-                                                "content": label,
-                                                "tool_name": tool_name,
-                                                "args": args,
-                                                "timestamp": time.time(),
-                                            },
-                                        )
-
-                                def subagent_tool_output(tool_name, output):
-                                    if worker_event_callback:
-                                        worker_event_callback(
-                                            "worker_detail",
-                                            {
-                                                "worker_id": worker_id,
-                                                "detail_type": "tool_output",
-                                                "content": str(output),
-                                                "tool_name": tool_name,
-                                                "timestamp": time.time(),
-                                            },
-                                        )
-
-                                tool_args.update(
-                                    _status_callback=subagent_status,
-                                    _tool_call_callback=subagent_tool_call,
-                                    _tool_output_callback=subagent_tool_output,
-                                    _stop_event=stop_event,
-                                )
-
-                            if tool_call.function.name == "load_skill":
-                                tool_args["_agent"] = self
-
-                            tool_output = self._run_tool_for_current_turn(
-                                tool_call.function.name,
-                                is_plan_mode,
-                                **tool_args,
-                            )
-                            # print(f"[TOOL] Tool '{tool_call.function.name}' executed successfully.")
-
-                            if tool_output_callback:
-                                tool_output_callback(tool_call.function.name, tool_output)
-
-                            if worker_id and worker_event_callback:
-                                worker_event_callback(
-                                    "worker_status",
-                                    {
-                                        "worker_id": worker_id,
-                                        "status": "completed",
-                                        "result": str(tool_output),
-                                        "timestamp": time.time(),
-                                    },
-                                )
-
-                            if tool_span:
-                                try:
-                                    tool_span.end(output=tool_output)
-                                except Exception as le:
-                                    print(
-                                        f"[Langfuse] Failed to end tool span: {le}",
-                                        file=sys.stderr,
+                            def subagent_tool_output(tool_name, output):
+                                if worker_event_callback:
+                                    worker_event_callback(
+                                        "worker_detail",
+                                        {
+                                            "worker_id": worker_id,
+                                            "detail_type": "tool_output",
+                                            "content": str(output),
+                                            "tool_name": tool_name,
+                                            "timestamp": time.time(),
+                                        },
                                     )
 
-                            # If this is a todo tool call, display the todo list
-                            if (
-                                tool_call.function.name in ("todo_write", "todo_update", "todo_read")
-                                and todo_display_callback
-                            ):
-                                try:
-                                    todo_data = json.loads(tool_output)
-                                    if "items" in todo_data:
-                                        todo_display_callback(todo_data["items"])
-                                except (json.JSONDecodeError, KeyError):
-                                    pass  # Silently fail if todo output is not in expected format
-
-                            tool_results.append((tool_call, tool_output, False))
-                        except Exception as e:
-                            # print(f"[ERROR] Tool execution failed: {e}")
-                            tool_error = f"Error executing tool: {str(e)}"
-                            if tool_span:
-                                try:
-                                    tool_span.end(output={"error": str(e)})
-                                except Exception as le:
-                                    print(
-                                        f"[Langfuse] Failed to end tool span: {le}",
-                                        file=sys.stderr,
-                                    )
-
-                            if worker_id and worker_event_callback:
-                                worker_event_callback(
-                                    "worker_status",
-                                    {
-                                        "worker_id": worker_id,
-                                        "status": "failed",
-                                        "result": str(e),
-                                        "timestamp": time.time(),
-                                    },
-                                )
-
-                            tool_results.append((tool_call, tool_error, True))
-
-                    # Add assistant message with all tool calls
-                    self.add_assistant_message(
-                        content=accumulated_content, tool_calls=final_tool_calls
-                    )
-
-                    # Add all tool messages
-                    for tool_call, output, _ in tool_results:
-                        self.add_tool_message(tool_call, output)
-
-                    self.update_context_size()
-                    self.iteration += 1
-
-                else:
-                    # print("[LLM] No tool calls detected. Returning final response.")
-                    # print(f"[OUTPUT] Final content: {accumulated_content[:200]}{'...' if len(accumulated_content) > 200 else ''}")
-
-                    self.add_assistant_message(accumulated_content)
-                    self.update_context_size()
-
-                    # Reset mode back to default if this was a /plan query
-                    if is_plan_mode:
-                        self.set_mode(name="default")
-
-                    if trace:
-                        try:
-                            trace.update(
-                                output={
-                                    "response": accumulated_content,
-                                    "iterations": self.iteration + 1,
-                                }
-                            )
-                        except Exception as le:
-                            print(
-                                f"[Langfuse] Failed to update trace: {le}",
-                                file=sys.stderr,
+                            tool_args.update(
+                                _status_callback=subagent_status,
+                                _tool_call_callback=subagent_tool_call,
+                                _tool_output_callback=subagent_tool_output,
+                                _stop_event=stop_event,
                             )
 
-                    return accumulated_content
+                        if tool_call.function.name == "load_skill":
+                            tool_args["_agent"] = self
 
-            # print("[STOP] Max iterations reached. Terminating process.")
-            # Reset mode back to default if this was a /plan query
-            if is_plan_mode:
-                self.set_mode(name="default")
+                        tool_output = self._run_tool_for_current_turn(
+                            tool_call.function.name,
+                            **tool_args,
+                        )
+                        # print(f"[TOOL] Tool '{tool_call.function.name}' executed successfully.")
 
-            if trace:
-                try:
-                    trace.update(
-                        output={
-                            "error": "Max iterations reached",
-                            "iterations": self.iteration,
-                        }
-                    )
-                except Exception as le:
-                    print(
-                        f"[Langfuse] Failed to update trace: {le}",
-                        file=sys.stderr,
-                    )
+                        if tool_output_callback:
+                            tool_output_callback(tool_call.function.name, tool_output)
 
-            return "Max iterations reached. Process terminated."
-        finally:
-            if trace:
-                try:
-                    lf_obs.flush()
-                except Exception as le:
-                    print(f"[Langfuse] Failed to flush trace: {le}", file=sys.stderr)
+                        if worker_id and worker_event_callback:
+                            worker_event_callback(
+                                "worker_status",
+                                {
+                                    "worker_id": worker_id,
+                                    "status": "completed",
+                                    "result": str(tool_output),
+                                    "timestamp": time.time(),
+                                },
+                            )
+
+                        # If this is a todo tool call, display the todo list
+                        if (
+                            tool_call.function.name
+                            in ("todo_write", "todo_update", "todo_read")
+                            and todo_display_callback
+                        ):
+                            try:
+                                todo_data = json.loads(tool_output)
+                                if "items" in todo_data:
+                                    todo_display_callback(todo_data["items"])
+                            except (json.JSONDecodeError, KeyError):
+                                pass  # Silently fail if todo output is not in expected format
+
+                        tool_results.append((tool_call, tool_output, False))
+                    except Exception as e:
+                        # print(f"[ERROR] Tool execution failed: {e}")
+                        tool_error = f"Error executing tool: {str(e)}"
+
+                        if worker_id and worker_event_callback:
+                            worker_event_callback(
+                                "worker_status",
+                                {
+                                    "worker_id": worker_id,
+                                    "status": "failed",
+                                    "result": str(e),
+                                    "timestamp": time.time(),
+                                },
+                            )
+
+                        tool_results.append((tool_call, tool_error, True))
+
+                # Add assistant message with all tool calls
+                self.add_assistant_message(
+                    content=accumulated_content, tool_calls=final_tool_calls
+                )
+
+                # Add all tool messages
+                for tool_call, output, _ in tool_results:
+                    self.add_tool_message(tool_call, output)
+
+                self.update_context_size()
+                self.iteration += 1
+
+            else:
+                # print("[LLM] No tool calls detected. Returning final response.")
+                # print(f"[OUTPUT] Final content: {accumulated_content[:200]}{'...' if len(accumulated_content) > 200 else ''}")
+
+                self.add_assistant_message(accumulated_content)
+                self.update_context_size()
+
+                return accumulated_content
+
+        # print("[STOP] Max iterations reached. Terminating process.")
+        return "Max iterations reached. Process terminated."

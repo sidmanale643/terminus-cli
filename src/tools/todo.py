@@ -4,13 +4,11 @@ from textwrap import dedent
 from typing import List, Literal, Optional
 
 from src.models.tool import ToolSchema
-
-
-TODO_FILE = ".todos.json"
+from src.constants import TODO_FILE
 
 
 def _load_todos() -> List[dict]:
-    """Load todo items from the hidden JSON file."""
+    """Load todo items from the todos file."""
     if not os.path.exists(TODO_FILE):
         return []
     try:
@@ -22,12 +20,13 @@ def _load_todos() -> List[dict]:
 
 
 def _save_todos(items: List[dict]) -> None:
-    """Save todo items to the hidden JSON file.
+    """Save todo items to the todos file.
     If all items are completed, delete the file instead."""
     if not items or all(item.get("status") == "completed" for item in items):
         if os.path.exists(TODO_FILE):
             os.remove(TODO_FILE)
         return
+    os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
     with open(TODO_FILE, "w", encoding="utf-8") as f:
         json.dump({"items": items}, f, indent=2)
 
@@ -111,7 +110,7 @@ class TodoRead(ToolSchema):
 
     def description(self):
         return dedent("""
-        Read the current todo list from the hidden JSON file.
+        Read the current todo list from the todos file.
         Returns all tasks with their statuses.
         """)
 

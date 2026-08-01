@@ -2,7 +2,6 @@ import sqlite3
 import datetime
 import os
 import json
-import uuid
 from src.constants import DEFAULT_DATABASE_DIR
 
 class SessionHistory:
@@ -147,17 +146,6 @@ class SessionHistory:
             for msg in session_messages
         ]
         return self.insert_to_chat_history(name, chat_history)
-
-    def get_session_id(self):
-        """Return a stable session ID for grouping related traces.
-
-        Uses the timestamp of the first message in the session, or generates
-        a new UUID if the session is empty.
-        """
-        messages = self.retrieve_session_history(limit=1)
-        if messages:
-            return f"session-{messages[0]['timestamp']}"
-        return f"session-{uuid.uuid4().hex[:12]}"
 
     def clear_session_history(self):
         self.sh_cursor.execute("DELETE FROM session_history")
