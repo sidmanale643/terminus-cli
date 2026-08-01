@@ -9,12 +9,18 @@ import time
 from src.agent import Agent
 from src.commands.registry import CommandRegistry
 from src.utils import discover_skills
-from ui import ReactDisplay
 from ui.theme import COLORS
 from src.utils import process_file_references
-from src.observability import langfuse as lf_obs
 from dotenv import set_key
 from src.cli.terminal import copy_to_clipboard, sanitize_terminal_input
+from src.mission import MissionController, MissionStore
+
+
+def create_display(stop_event):
+    """Create the Rich terminal UI."""
+    from rich_ui import RichDisplay
+
+    return RichDisplay(stop_event=stop_event)
 
 
 class TerminusCLI:
@@ -24,7 +30,10 @@ class TerminusCLI:
 
         self.stop_event = threading.Event()
         self.agent = Agent(cwd=cwd, use_streaming=True)
-        self.display = ReactDisplay(stop_event=self.stop_event)
+        self.display = create_display(stop_event=self.stop_event)
+        self.mission_store = MissionStore()
+        self.mission_store.mark_active_interrupted()
+        self._active_mission: MissionController | None = None
         self.sigint_pending_exit = False
         self.last_sigint_time = 0.0
         self.sigint_grace_window = 2.0  # seconds to treat double Ctrl+C as exit
@@ -58,6 +67,13 @@ class TerminusCLI:
             self.agent.tool_registry.shutdown()
         except Exception:
             pass
+        if self._active_mission is not None:
+            self._active_mission.cancel()
+            self._active_mission = None
+        try:
+            self.mission_store.close()
+        except Exception:
+            pass
 
     def _exit_app(self):
         self.begin_shutdown()
@@ -72,8 +88,39 @@ class TerminusCLI:
     def _emit_worker_event(self, event_type: str, data: dict):
         """Forward subagent lifecycle events to the display."""
         method_name = f"send_{event_type}"
-        if hasattr(self.display, method_name):
-            getattr(self.display, method_name)(**data)
+        method = getattr(self.display, method_name, None)
+        if method is None:
+            return
+        allowed = {
+            "worker_spawned": {"worker_id", "name", "description", "role"},
+            "worker_notification": {
+                "worker_id",
+                "status",
+                "summary",
+                "final_response",
+                "timestamp",
+            },
+            "worker_status": {
+                "worker_id",
+                "status",
+                "result",
+                "result_envelope",
+                "timestamp",
+            },
+            "worker_detail": {
+                "worker_id",
+                "detail_type",
+                "content",
+                "tool_name",
+                "args",
+                "timestamp",
+            },
+        }.get(event_type, set(data))
+        method(**{key: value for key, value in data.items() if key in allowed})
+
+    def _emit_mission_event(self, event):
+        if hasattr(self.display, "handle_mission_event"):
+            self.display.handle_mission_event(event)
 
     def process_query(self, user_input: str):
         """Process user query and coordinate with agent and display"""
@@ -147,10 +194,6 @@ class TerminusCLI:
         # Reset session
         if command.lower() == "/reset":
             self.agent.clear_session()
-            try:
-                self.agent.tool_registry.refresh_mcp_tools()
-            except Exception as e:
-                self.display.render_error(f"MCP refresh failed during reset: {e}")
             self.display.render_success_message("Session reset successfully")
             return True
 
@@ -192,15 +235,34 @@ class TerminusCLI:
             self.display.render_help()
             return True
 
-        # Plan mode — passes through to agent
-        if command.lower().startswith("/plan"):
-            if hasattr(self.display, "generation_start"):
-                self.display.generation_start()
-            try:
-                self.process_query(command)
-            finally:
-                if hasattr(self.display, "generation_end"):
-                    self.display.generation_end()
+        # Durable Mission Control runtime and audit commands.
+        if command.lower().startswith("/mission"):
+            task = command[len("/mission") :].strip()
+            if not task:
+                self.display.render_error(
+                    "Usage: /mission <goal> | /mission list | /mission replay <id>"
+                )
+                return True
+            if task.lower() == "list":
+                self._list_missions()
+                return True
+            if task.lower() == "replay":
+                self.display.render_error("Usage: /mission replay <id>")
+                return True
+            if task.lower().startswith("replay "):
+                if self._active_mission is not None:
+                    self.display.render_error(
+                        "Finish or cancel the active mission before opening a replay."
+                    )
+                    return True
+                self._replay_mission(task.split(maxsplit=1)[1])
+                return True
+            if self._active_mission is not None:
+                self.display.render_error(
+                    "A mission is awaiting input. Answer it or cancel it before starting another."
+                )
+                return True
+            self._start_mission(task)
             self.display.print_newline()
             return True
 
@@ -249,10 +311,6 @@ class TerminusCLI:
                 self.display.print_message("[dim]Model selection cancelled.[/dim]")
             return True
 
-        if command.lower() == "/mcp" or command.lower().startswith("/mcp "):
-            self._handle_mcp_command(command)
-            return True
-
         # Connect provider and configure API key
         if command.lower() == "/connect":
             try:
@@ -267,7 +325,6 @@ class TerminusCLI:
 
                 # Determine the env var name for this provider
                 env_var_map = {
-                    "groq": "GROQ_API_KEY",
                     "openrouter": "OPEN_ROUTER_API_KEY",
                 }
                 env_var = env_var_map.get(provider_name)
@@ -275,8 +332,10 @@ class TerminusCLI:
                     self.display.render_error(f"Unknown provider: {provider_name}")
                     return True
 
-                # Save to .env file
-                env_path = os.path.join(os.getcwd(), ".env")
+                # Save to user-level .env
+                env_dir = os.path.expanduser("~/.terminus")
+                os.makedirs(env_dir, exist_ok=True)
+                env_path = os.path.join(env_dir, ".env")
                 set_key(env_path, env_var, api_key)
                 os.environ[env_var] = api_key
                 if env_var == "OPEN_ROUTER_API_KEY":
@@ -335,55 +394,6 @@ class TerminusCLI:
 
         return True
 
-    def _handle_mcp_command(self, command: str):
-        parts = command.strip().split()
-        subcommand = parts[1].lower() if len(parts) > 1 else "status"
-
-        if subcommand in {"status", ""}:
-            self._render_mcp_status(self.agent.tool_registry.mcp_status())
-            return
-
-        if subcommand == "refresh":
-            status = self.agent.tool_registry.refresh_mcp_tools()
-            self.display.render_success_message("MCP tools refreshed")
-            self._render_mcp_status(status)
-            return
-
-        if subcommand == "tools":
-            tools_by_server = self.agent.tool_registry.mcp_tools_by_server()
-            if not tools_by_server:
-                self.display.print_message("[dim]No MCP tools discovered.[/dim]")
-                return
-            lines = []
-            for server_id, tools in sorted(tools_by_server.items()):
-                lines.append(f"[bold]{server_id}[/bold]")
-                for tool_name in sorted(tools):
-                    lines.append(f"  - {tool_name}")
-            self.display.print_message("\n".join(lines))
-            return
-
-        self.display.render_error(f"Unknown MCP command: {command}")
-
-    def _render_mcp_status(self, status: dict):
-        servers = status.get("servers", {})
-        if not servers:
-            self.display.print_message(
-                f"[dim]No MCP servers configured. Expected {status.get('config_path')}[/dim]"
-            )
-        else:
-            lines = [f"MCP config: {status.get('config_path')}"]
-            for server_id, server in sorted(servers.items()):
-                tool_count = server.get("tool_count", 0)
-                state = server.get("status", "unknown")
-                line = f"- {server_id}: {state}, {tool_count} tool{'s' if tool_count != 1 else ''}"
-                if server.get("error"):
-                    line += f" ({server['error']})"
-                lines.append(line)
-            self.display.print_message("\n".join(lines))
-
-        for warning in status.get("warnings", []):
-            self.display.print_message(f"[yellow]Warning: {warning}[/yellow]")
-
     def _display_history(self):
         """Display session history"""
         history = self.agent.get_session_history(limit=5)
@@ -417,6 +427,91 @@ class TerminusCLI:
 
         self.display.render_history(history_lines)
 
+    def _start_mission(self, goal: str):
+        self.stop_event.clear()
+        self._last_response = None
+        controller = MissionController(
+            goal=goal,
+            cwd=os.getcwd(),
+            store=self.mission_store,
+            event_callback=self._emit_mission_event,
+            stop_event=self.stop_event,
+        )
+        self._active_mission = controller
+        self.display.mission_start(
+            title="mission",
+            goal=goal,
+            phase="brief",
+            mission_id=controller.mission_id,
+        )
+        self._run_mission_turn()
+
+    def _run_mission_turn(self, answer: str | None = None):
+        controller = self._active_mission
+        if controller is None:
+            return
+        handler = self.display.create_response_handler()
+        try:
+            with handler:
+                outcome = controller.run(
+                    answer,
+                    status_callback=handler.update_status,
+                    tool_call_callback=handler.display_tool_call,
+                    tool_output_callback=handler.display_tool_output,
+                )
+        except KeyboardInterrupt:
+            controller.cancel()
+            outcome = controller.outcome()
+        self._last_response = outcome.summary
+        if outcome.awaiting_input:
+            handler.render_final_response(outcome.summary)
+            return
+        if outcome.terminal:
+            self.display.mission_end(summary=outcome.summary, status=outcome.status.value)
+            self._active_mission = None
+            self.sigint_pending_exit = False
+            self.display.clear_pending_exit()
+
+    def _list_missions(self):
+        missions = self.mission_store.list_missions()
+        if not missions:
+            self.display.print_message("No persisted missions.")
+            return
+        self.display.print_message("[bold]Recent missions[/bold]")
+        for mission in missions:
+            mission_id = mission["id"]
+            self.display.print_message(
+                f"[dim]{mission_id[:8]}[/dim]  {mission['status']:<11}  "
+                f"{mission['phase']:<14}  {mission['goal']}"
+            )
+
+    def _replay_mission(self, mission_id: str):
+        mission = self.mission_store.get_mission(mission_id)
+        if mission is None:
+            matches = [
+                item
+                for item in self.mission_store.list_missions(limit=100)
+                if item["id"].startswith(mission_id)
+            ]
+            if len(matches) == 1:
+                mission = matches[0]
+                mission_id = mission["id"]
+        if mission is None:
+            self.display.render_error(f"Mission not found: {mission_id}")
+            return
+        self.display.mission_start(
+            title="replay",
+            goal=mission["goal"],
+            phase="brief",
+            mission_id=mission_id,
+        )
+        for event in self.mission_store.get_events(mission_id):
+            self._emit_mission_event(event)
+        self.display.mission_end(
+            summary=mission.get("summary") or "",
+            status=mission["status"],
+        )
+
     def _load_skill(self, skill: dict):
         """Load a skill's content into the current conversation context."""
         skill_name = skill.get("name", "unknown")
@@ -430,6 +525,8 @@ class TerminusCLI:
 
     def run_interactive(self):
         """Run interactive mode with conversation loop"""
+        if hasattr(self.display, "start_interactive"):
+            self.display.start_interactive()
         self.display.render_banner()
         while True:
             try:
@@ -447,7 +544,12 @@ class TerminusCLI:
                 if not user_input.strip():
                     continue
 
-                if hasattr(self.display, "render_user_message"):
+                # ask_question already paints the selection into the transcript;
+                # don't re-render the auto-queued answer as another "You" block.
+                silent = False
+                if hasattr(self.display, "consume_last_input_was_silent"):
+                    silent = self.display.consume_last_input_was_silent()
+                if not silent and hasattr(self.display, "render_user_message"):
                     self.display.render_user_message(user_input)
 
                 # Check if it's a registered slash command or exit alias
@@ -458,6 +560,18 @@ class TerminusCLI:
                     should_continue = self.execute_command(user_input)
                     if not should_continue:
                         break
+                    continue
+
+                if self._active_mission is not None:
+                    if hasattr(self.display, "generation_start"):
+                        self.display.generation_start()
+                    try:
+                        self.stop_event.clear()
+                        self._run_mission_turn(user_input)
+                    finally:
+                        if hasattr(self.display, "generation_end"):
+                            self.display.generation_end()
+                    self.display.print_newline()
                     continue
 
                 # Process as query
@@ -479,14 +593,16 @@ class TerminusCLI:
                 self.sigint_pending_exit = False
                 continue
             except EOFError:
-                # The React/Ink process may receive Ctrl+C before its interrupt
-                # message reaches Python. Treat its normal SIGINT exit as EOF.
                 break
 
     def run_single_query(self, query: str):
         """Run a single query (useful for non-interactive mode)"""
         self.display.render_banner()
-        self.process_query(query)
+        first = query.lower().split()[0] if query.strip() else ""
+        if CommandRegistry.is_registered(first):
+            self.execute_command(query)
+        else:
+            self.process_query(query)
 
 
 def main():
@@ -504,12 +620,6 @@ def main():
     invoked_dir = os.getcwd()
     cli = TerminusCLI(cwd=invoked_dir)
 
-    # Verify Langfuse connectivity early so the user knows if traces will be lost.
-    if lf_obs.is_enabled():
-        ok, msg = lf_obs.test_connection()
-        if not ok:
-            cli.display.print_message(f"[yellow]Langfuse warning:[/yellow] {msg}")
-
     try:
         if args.query:
             cli.run_single_query(" ".join(args.query))
@@ -517,8 +627,6 @@ def main():
             cli.run_interactive()
     finally:
         cli.begin_shutdown()
-        # Ensure any queued Langfuse events are flushed before exit.
-        lf_obs.flush()
         # Graceful shutdown for React UI
         if hasattr(cli.display, "shutdown"):
             cli.display.shutdown()
