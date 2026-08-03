@@ -5,7 +5,6 @@ Keyboard input is line-based (Rich `Prompt`); double-Ctrl+C exit semantics are
 handled by `TerminusCLI`'s SIGINT handler in `src/cli/application.py`.
 """
 
-import json
 import os
 import re
 import time
@@ -26,10 +25,19 @@ from rich_ui.worker_board import MissionBoard
 from src.cli.terminal import MOUSE_REPORTING_OFF, MOUSE_REPORTING_ON, read_terminal_line
 from src.commands.registry import CommandRegistry
 from src.models.llm import available_models
+from ui.display_text import (
+    ACTIVITY_LINE_MAX,
+    humanize_output_lines,
+    humanize_text,
+    one_line,
+    tool_arg_detail_lines,
+    tool_call_label,
+)
 from ui.theme import COLORS, create_progress_bar, get_role_color
 
 MAX_BODY_CHARS = 12000
-MAX_PREVIEW_CHARS = 240
+MAX_PREVIEW_CHARS = 320
+MAX_TOOL_OUTPUT_DISPLAY_LINES = 16
 QUESTION_FALLBACK_OPTIONS = [
     "Use the recommended default",
     "Let me decide manually",
@@ -118,16 +126,12 @@ class RichDisplay:
         )
 
     def _preview_text(self, value: str, max_chars: int = MAX_PREVIEW_CHARS) -> str:
-        clean = self._clean_text(value)
-        first_line = clean.splitlines()[0] if clean else ""
-        return first_line[:max_chars]
+        clean = humanize_text(self._clean_text(value), max_chars=max_chars * 4)
+        return one_line(clean, max_chars)
 
-    def _args_preview(self, args: dict) -> str:
-        try:
-            encoded = json.dumps(args or {})
-        except (TypeError, ValueError):
-            encoded = str(args)
-        return encoded[:200]
+    def _tool_detail_lines(self, tool_name: str, args: dict) -> list[str]:
+        """Human secondary args for a tool call — never a raw JSON dump."""
+        return tool_arg_detail_lines(tool_name, args or {})
 
     # ------------------------------------------------------------------ #
     # Output
@@ -225,6 +229,11 @@ class RichDisplay:
 
     def _redraw(self, input_active: bool = False):
         if not self._interactive or not self.console.is_terminal:
+            return
+        # Mission Control owns the alternate screen while Live is running.
+        # Painting the homepage here would yank the user out of the board
+        # (e.g. if a scroll-driven redraw races the mission input loop).
+        if self._board is not None and self._board.is_live():
             return
         self._ensure_screen()
         self.console.file.write(SYNC_UPDATE_BEGIN + "\x1b[?25l\x1b[H")
@@ -662,18 +671,21 @@ class RichDisplay:
 
     def send_tool_call(self, tool_name: str, label: str, args: dict):
         is_question_tool = tool_name == "ask_question"
+        human_label = tool_call_label(tool_name, args, fallback=label or "")
         if self._board is not None:
-            self._board.tool_call(tool_name, label)
+            self._board.tool_call(tool_name, human_label, args=args)
         else:
             self._emit(
-                Text(f"▸ {tool_name} · {label}", style=f"bold {COLORS['warning']}")
+                Text(
+                    f"▸ {tool_name} · {human_label}",
+                    style=f"bold {COLORS['warning']}",
+                )
             )
-            # Question content is rendered as an in-chat block; skip raw args dump.
+            # Secondary human details only — never raw JSON args.
             if not is_question_tool:
-                preview = self._args_preview(args)
-                if preview:
+                for detail in self._tool_detail_lines(tool_name, args or {}):
                     self._emit(
-                        Text(f"  args: {preview}", style=COLORS["subtle"]),
+                        Text(f"  {detail}", style=COLORS["subtle"]),
                         markup=False,
                     )
         if is_question_tool:
@@ -686,9 +698,21 @@ class RichDisplay:
         # ask_question already presents the full prompt + answer in-chat.
         if tool_name == "ask_question":
             return
-        preview = self._preview_text(str(output))
-        if preview:
-            self._emit(Text(f"  ↳ {preview}", style=COLORS["subtle"]), markup=False)
+        lines = humanize_output_lines(
+            self._clean_text(str(output)),
+            max_lines=MAX_TOOL_OUTPUT_DISPLAY_LINES,
+            max_chars=MAX_BODY_CHARS,
+        )
+        if not lines:
+            return
+        # First line with arrow; continuation indented so multi-line output is readable.
+        for index, line in enumerate(lines):
+            prefix = "  ↳ " if index == 0 else "    "
+            # Soft cap per line for the transcript (full body still multi-line).
+            display = one_line(line, ACTIVITY_LINE_MAX) if "\n" not in line else line
+            if len(display) > ACTIVITY_LINE_MAX:
+                display = display[: ACTIVITY_LINE_MAX - 1] + "…"
+            self._emit(Text(f"{prefix}{display}", style=COLORS["subtle"]), markup=False)
 
     # ------------------------------------------------------------------ #
     # Question prompt (ask_question tool)
@@ -744,17 +768,11 @@ class RichDisplay:
         )
         self._queued_input_silent.append(True)
 
-    def _render_question_block(
-        self, index: int, question: dict, total: int
-    ) -> None:
+    def _render_question_block(self, index: int, question: dict, total: int) -> None:
         title = f"Question {index}" if total == 1 else f"Question {index}/{total}"
         body = Text()
         body.append(self._clean_text(question["text"]), style=COLORS["text"])
-        mode = (
-            "select one or more"
-            if question.get("allowMultiple")
-            else "select one"
-        )
+        mode = "select one or more" if question.get("allowMultiple") else "select one"
         body.append(f"  ·  {mode}", style=f"italic {COLORS['muted']}")
         body.append("\n")
         for option_index, option in enumerate(question["options"], start=1):
@@ -923,11 +941,23 @@ class RichDisplay:
             )
         elif event.event_type == "task_status":
             self._board.status(event.task_id, payload.get("status", "running"))
+        elif event.event_type == "task_detail":
+            self._board.detail(
+                event.task_id,
+                payload.get("detail_type", "status"),
+                payload.get("content", ""),
+                tool_name=payload.get("tool_name"),
+                args=payload.get("args"),
+            )
         elif event.event_type == "task_result":
             status = payload.get("status", "failed")
             summary = payload.get("summary") or payload.get("error") or ""
             self._board.notify(event.task_id, status, summary)
-            self._board.status(event.task_id, status, result=summary)
+            self._board.status(
+                event.task_id,
+                status,
+                result_data=payload,
+            )
         return True
 
     def send_worker_spawned(
