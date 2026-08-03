@@ -300,80 +300,10 @@ class Agent:
         return False
 
     def display_tool(self, tool_name: str, tool_args: dict = None):
-        """Generate a descriptive message for tool usage with specific arguments"""
+        """Generate a human-readable label for tool usage (never raw JSON)."""
+        from ui.display_text import tool_call_label
 
-        if tool_args is None:
-            tool_args = {}
-
-        # Generate specific messages based on tool and arguments
-        if tool_name == ASK_QUESTION_TOOL_NAME:
-            questions = tool_args.get("questions") or []
-            count = len(questions)
-            if count == 1:
-                return "asking a clarifying question"
-            return f"asking {count} clarifying questions"
-
-        if tool_name == "file_reader" and "file_path" in tool_args:
-            filename = tool_args["file_path"].split("/")[-1]
-            return f"reading {filename}"
-
-        elif tool_name == "file_reader" and "files" in tool_args:
-            count = len(tool_args["files"])
-            return f"reading {count} file{'s' if count > 1 else ''}"
-
-        elif tool_name == "file_creator" and "file_path" in tool_args:
-            filename = tool_args["file_path"].split("/")[-1]
-            return f"creating {filename}"
-
-        elif tool_name == "file_editor" and "file_path" in tool_args:
-            filename = tool_args["file_path"].split("/")[-1]
-            if "old_strings" in tool_args:
-                return f"performing multiple edits in {filename}"
-            return f"editing {filename}"
-
-        elif tool_name == "bash" and "command" in tool_args:
-            return "executing bash command"
-
-        elif tool_name == "web_search" and "query" in tool_args:
-            query = tool_args["query"][:30]  # Truncate long queries
-            return f"searching web for '{query}'"
-
-        elif tool_name == "sandbox" and "code" in tool_args:
-            language = tool_args.get("language", "python")
-            return f"running {language} code in sandbox"
-
-        elif tool_name == "subagent" and "task" in tool_args:
-            return f"delegating: {tool_args['task'][:40]}"
-
-        elif tool_name in ("todo_write", "todo_update") and "task" in tool_args:
-            task = tool_args["task"][:40]  # Truncate long task names
-            status = tool_args.get("status", "pending")
-            if tool_name == "todo_write":
-                return f"adding task: {task}"
-            elif status == "completed":
-                return f"completing task: {task}"
-            elif status == "in_progress":
-                return f"starting task: {task}"
-            else:
-                return f"updating task: {task}"
-
-        elif tool_name == "todo_read":
-            return "reading todos"
-
-        # Fallback to generic messages
-        tool_message = {
-            "file_reader": "reading",
-            "bash": "executing",
-            "todo_write": "writing todos",
-            "todo_read": "reading todos",
-            "todo_update": "updating todos",
-            "file_creator": "creating file",
-            "file_editor": "editing file",
-            "subagent": "delegating to sub-agent",
-            "web_search": "searching the web",
-        }
-
-        return tool_message.get(tool_name, "calling tool")
+        return tool_call_label(tool_name or "", tool_args or {})
 
     def _tool_schemas(self):
         return self.tool_registry.tool_schemas
