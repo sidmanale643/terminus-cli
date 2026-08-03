@@ -30,6 +30,7 @@ class LlmProvider(ABC):
         model_name: str = "glm-4.5-air", 
         temperature: float = 0.3,
         provider_routing: Optional[List[str]] = None,
+        response_format: Optional[Dict] = None,
     ) -> Response:
         pass
     
@@ -44,12 +45,20 @@ class LlmProvider(ABC):
         model_name: str = "glm-4.5-air", 
         temperature: float = 0.3,
         provider_routing: Optional[List[str]] = None,
+        response_format: Optional[Dict] = None,
     ) -> Response:
         """Async generate. Default implementation delegates to sync generate in a thread.
         Providers should override this for true async I/O."""
         import asyncio
         return await asyncio.to_thread(
-            self.generate, messages, tools, tool_choice, model_name, temperature
+            self.generate,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            model_name=model_name,
+            temperature=temperature,
+            provider_routing=provider_routing,
+            response_format=response_format,
         )
 
     def _get_provider_name(self):

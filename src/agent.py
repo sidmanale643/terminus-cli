@@ -439,6 +439,8 @@ class Agent:
         stop_event: Optional[Event] = None,
         worker_event_callback=None,
         stream_callback=None,
+        response_format: dict | None = None,
+        usage_callback=None,
     ):
         """
         Run the agent with a user message
@@ -487,9 +489,24 @@ class Agent:
                         tool_choice="auto",
                         model_name=self.model,
                         temperature=0.3,
+                        response_format=response_format,
                     ):
                         if stop_event.is_set():
                             raise KeyboardInterrupt()
+
+                        if usage_callback and (
+                            response_chunk.prompt_tokens is not None
+                            or response_chunk.response_tokens is not None
+                        ):
+                            usage_callback(
+                                {
+                                    "provider": self.llm_service.active_provider_name,
+                                    "requested_model": self.model,
+                                    "response_model": response_chunk.model,
+                                    "prompt_tokens": response_chunk.prompt_tokens,
+                                    "response_tokens": response_chunk.response_tokens,
+                                }
+                            )
 
                         if response_chunk.reasoning and status_callback:
                             status_callback(response_chunk.reasoning, is_thinking=True)
@@ -535,7 +552,19 @@ class Agent:
                         tool_choice="auto",
                         model_name=self.model,
                         temperature=0.3,
+                        response_format=response_format,
                     )
+
+                    if usage_callback:
+                        usage_callback(
+                            {
+                                "provider": self.llm_service.active_provider_name,
+                                "requested_model": self.model,
+                                "response_model": response.model,
+                                "prompt_tokens": response.prompt_tokens,
+                                "response_tokens": response.response_tokens,
+                            }
+                        )
 
                     if (
                         response.reasoning

@@ -8,6 +8,7 @@ from .ask_question import AskQuestion
 from .sandbox import Sandbox
 from .web_search import WebSearch
 from .load_skill import LoadSkill
+from .mission_dispatch import MissionDispatch
 
 __all__ = [
     "FileReader",
@@ -22,4 +23,5 @@ __all__ = [
     "Sandbox",
     "WebSearch",
     "LoadSkill",
+    "MissionDispatch",
 ]

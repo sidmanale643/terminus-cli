@@ -27,7 +27,10 @@ class FileCreator(ToolSchema):
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "the absolute path of the file to create",
+                            "description": (
+                                "path of the file to create; relative paths are resolved "
+                                "from the current working directory"
+                            ),
                         },
                         "path": {
                             "type": "string",

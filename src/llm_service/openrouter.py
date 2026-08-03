@@ -10,6 +10,7 @@ import os
 load_dotenv(os.path.expanduser("~/.terminus/.env"))
 load_dotenv()
 
+
 class OpenRouterProvider(LlmProvider):
     def __init__(self, name: str):
         super().__init__()
@@ -37,15 +38,18 @@ class OpenRouterProvider(LlmProvider):
         model_name: str,
         temperature: float,
         provider_routing: Optional[List[str]] = None,
+        response_format: Optional[Dict] = None,
     ) -> Dict:
         request_params = {
             "model": model_name,
             "messages": messages,
             "temperature": temperature,
-            "extra_body": {"usage": {"include": True}}
+            "extra_body": {"usage": {"include": True}},
         }
         if provider_routing:
             request_params["extra_body"]["provider"] = {"order": provider_routing}
+        if response_format:
+            request_params["response_format"] = response_format
         if tools and len(tools) > 0:
             request_params["tools"] = tools
             request_params["tool_choice"] = tool_choice
@@ -71,8 +75,10 @@ class OpenRouterProvider(LlmProvider):
         tool_calls = parse_tool_calls(getattr(choice, "tool_calls", None))
         stop_reason = "tool_use" if tool_calls else "end_turn"
 
-        print(f"Usage - Prompt: {prompt_tokens}, Completion: {completion_tokens}, "
-              f"Total: {total_tokens}, Reasoning: {reasoning_tokens}")
+        print(
+            f"Usage - Prompt: {prompt_tokens}, Completion: {completion_tokens}, "
+            f"Total: {total_tokens}, Reasoning: {reasoning_tokens}"
+        )
         if cost is not None:
             print(f"Cost: {cost}")
 
@@ -84,7 +90,7 @@ class OpenRouterProvider(LlmProvider):
             model=response.model,
             temperature=temperature,
             prompt_tokens=prompt_tokens,
-            response_tokens=completion_tokens
+            response_tokens=completion_tokens,
         )
 
     def generate(
@@ -95,6 +101,7 @@ class OpenRouterProvider(LlmProvider):
         model_name: str = "deepseek/deepseek-v4-flash-0731",
         temperature: float = 0.3,
         provider_routing: Optional[List[str]] = None,
+        response_format: Optional[Dict] = None,
     ) -> Response:
         """
         Makes a request to OpenRouter API with optional reasoning capabilities.
@@ -102,7 +109,13 @@ class OpenRouterProvider(LlmProvider):
         try:
             client = self._client()
             request_params = self._build_request_params(
-                messages, tools, tool_choice, model_name, temperature, provider_routing
+                messages,
+                tools,
+                tool_choice,
+                model_name,
+                temperature,
+                provider_routing,
+                response_format,
             )
             response = client.chat.completions.create(**request_params)
             return self._parse_response(response, temperature)
@@ -117,17 +130,26 @@ class OpenRouterProvider(LlmProvider):
         model_name: str = "deepseek/deepseek-v4-flash-0731",
         temperature: float = 0.3,
         provider_routing: Optional[List[str]] = None,
+        response_format: Optional[Dict] = None,
     ) -> Response:
         """Async generate using AsyncOpenAI."""
         try:
             client = self._async_client()
             request_params = self._build_request_params(
-                messages, tools, tool_choice, model_name, temperature, provider_routing
+                messages,
+                tools,
+                tool_choice,
+                model_name,
+                temperature,
+                provider_routing,
+                response_format,
             )
             response = await client.chat.completions.create(**request_params)
             return self._parse_response(response, temperature)
         except Exception as e:
-            raise Exception(f"Error in OpenRouterProvider async: {type(e).__name__}: {e}")
+            raise Exception(
+                f"Error in OpenRouterProvider async: {type(e).__name__}: {e}"
+            )
 
     def stream(
         self,
@@ -138,6 +160,7 @@ class OpenRouterProvider(LlmProvider):
         temperature: float = 0.3,
         stream: bool = True,
         provider_routing: Optional[List[str]] = None,
+        response_format: Optional[Dict] = None,
     ) -> Response:
         """
         Stream a response from OpenRouter.
@@ -155,12 +178,16 @@ class OpenRouterProvider(LlmProvider):
                 "messages": messages,
                 "temperature": temperature,
                 "stream": True,
-                "extra_body": {"usage": {"include": True},
-                "reasoning" : {"enabled": True}}
+                "extra_body": {
+                    "usage": {"include": True},
+                    "reasoning": {"enabled": True},
+                },
             }
 
             if provider_routing:
                 request_params["extra_body"]["provider"] = {"order": provider_routing}
+            if response_format:
+                request_params["response_format"] = response_format
 
             # Add tools if provided
             if tools and len(tools) > 0:
@@ -171,17 +198,27 @@ class OpenRouterProvider(LlmProvider):
             stream = client.chat.completions.create(**request_params)
 
             for chunk in stream:
-                choice = chunk.choices[0].delta
+                choices = getattr(chunk, "choices", None) or []
+                choice = choices[0].delta if choices else None
                 content = getattr(choice, "content", "") or ""
                 reasoning_text = getattr(choice, "reasoning", None)
 
                 tool_calls = parse_tool_calls(getattr(choice, "tool_calls", None))
+                usage = getattr(chunk, "usage", None)
 
-                if content or (tool_calls and len(tool_calls) > 0) or reasoning_text:
-                    stop_reason = "tool_use" if (tool_calls and len(tool_calls) > 0) else "end_turn"
+                if (
+                    content
+                    or (tool_calls and len(tool_calls) > 0)
+                    or reasoning_text
+                    or usage
+                ):
+                    stop_reason = (
+                        "tool_use"
+                        if (tool_calls and len(tool_calls) > 0)
+                        else "end_turn"
+                    )
 
                     # Extract usage from chunk if available (usually in the last chunk)
-                    usage = getattr(chunk, "usage", None)
                     prompt_tokens = None
                     response_tokens = None
                     reasoning_tokens = 0
@@ -193,15 +230,21 @@ class OpenRouterProvider(LlmProvider):
                         cost = getattr(usage, "cost", None)
 
                         # Extract reasoning tokens if available
-                        completion_details = getattr(usage, "completion_tokens_details", None)
+                        completion_details = getattr(
+                            usage, "completion_tokens_details", None
+                        )
                         if completion_details:
-                            reasoning_tokens = getattr(completion_details, "reasoning_tokens", 0)
+                            reasoning_tokens = getattr(
+                                completion_details, "reasoning_tokens", 0
+                            )
 
                         # Print usage summary when available (final chunk)
                         if prompt_tokens is not None:
                             total_tokens = getattr(usage, "total_tokens", 0)
-                            print(f"Stream Usage - Prompt: {prompt_tokens}, Completion: {response_tokens}, "
-                                  f"Total: {total_tokens}, Reasoning: {reasoning_tokens}")
+                            print(
+                                f"Stream Usage - Prompt: {prompt_tokens}, Completion: {response_tokens}, "
+                                f"Total: {total_tokens}, Reasoning: {reasoning_tokens}"
+                            )
                             if cost is not None:
                                 print(f"Stream Cost: {cost}")
 
@@ -213,7 +256,7 @@ class OpenRouterProvider(LlmProvider):
                         model=getattr(chunk, "model", None),
                         temperature=temperature,
                         prompt_tokens=prompt_tokens,
-                        response_tokens=response_tokens
+                        response_tokens=response_tokens,
                     )
 
         except Exception as e:
@@ -226,5 +269,5 @@ class OpenRouterProvider(LlmProvider):
                 model=None,
                 temperature=None,
                 prompt_tokens=None,
-                response_tokens=None
+                response_tokens=None,
             )

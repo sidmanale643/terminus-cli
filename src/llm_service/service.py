@@ -58,12 +58,21 @@ class LLMService:
         tool_choice: str = "auto",
         model_name: Optional[str] = None,
         temperature: float = 0.3,
+        response_format: Optional[Dict] = None,
         ):
 
         provider = self._resolve_provider()
         model_name = self._resolve_model(model_name)
 
-        response = provider.generate(messages, tools, tool_choice, model_name, temperature, provider_routing=self.provider_routing)
+        response = provider.generate(
+            messages,
+            tools,
+            tool_choice,
+            model_name,
+            temperature,
+            provider_routing=self.provider_routing,
+            response_format=response_format,
+        )
         return response
 
     async def agenerate(self,
@@ -72,12 +81,21 @@ class LLMService:
         tool_choice: str = "auto",
         model_name: Optional[str] = None,
         temperature: float = 0.3,
+        response_format: Optional[Dict] = None,
         ):
         """Async generate dispatch."""
         provider = self._resolve_provider()
         model_name = self._resolve_model(model_name)
 
-        response = await provider.agenerate(messages, tools, tool_choice, model_name, temperature, provider_routing=self.provider_routing)
+        response = await provider.agenerate(
+            messages,
+            tools,
+            tool_choice,
+            model_name,
+            temperature,
+            provider_routing=self.provider_routing,
+            response_format=response_format,
+        )
         return response
 
     def stream(self,         
@@ -85,10 +103,19 @@ class LLMService:
         tools: Optional[List[Dict]] = None, 
         tool_choice: str = "auto", 
         model_name: Optional[str] = None, 
-        temperature: float = 0.3
+        temperature: float = 0.3,
+        response_format: Optional[Dict] = None,
         ):  
         
         provider = self._resolve_provider()
         model_name = self._resolve_model(model_name)
 
-        return provider.stream(messages, tools, tool_choice, model_name, temperature, provider_routing=self.provider_routing)
+        return provider.stream(
+            messages,
+            tools,
+            tool_choice,
+            model_name,
+            temperature,
+            provider_routing=self.provider_routing,
+            response_format=response_format,
+        )

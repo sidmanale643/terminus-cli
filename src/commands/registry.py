@@ -14,8 +14,19 @@ class CommandRegistry:
     _commands: ClassVar[dict[str, Command]] = {}
 
     @classmethod
-    def register(cls, name: str, description: str, usage: str = "", aliases: list[str] | None = None) -> None:
-        cmd = Command(name=name, description=description, usage=usage or name, aliases=aliases or [])
+    def register(
+        cls,
+        name: str,
+        description: str,
+        usage: str = "",
+        aliases: list[str] | None = None,
+    ) -> None:
+        cmd = Command(
+            name=name,
+            description=description,
+            usage=usage or name,
+            aliases=aliases or [],
+        )
         cls._commands[name] = cmd
         for alias in cmd.aliases:
             cls._commands[alias] = cmd
@@ -55,6 +66,11 @@ class CommandRegistry:
 
 
 CommandRegistry.register("/help", "Show the command reference")
+CommandRegistry.register(
+    "/mission",
+    "Run, list, or replay durable Mission Control tasks",
+    "/mission <goal> | /mission list | /mission replay <id>",
+)
 CommandRegistry.register("/context", "View current conversation context")
 CommandRegistry.register("/history", "View recent session history")
 CommandRegistry.register("/reset", "Reset session history")
