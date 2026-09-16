@@ -3,6 +3,7 @@ import subprocess
 from textwrap import dedent
 from typing import Any, Callable, Dict, Optional
 
+from src.command_permissions import CommandPermissionManager, PermissionDecision
 from src.models.tool import ToolSchema
 
 
@@ -22,14 +23,12 @@ class Bash(ToolSchema):
         return dedent("""
         Executes a bash command and returns its output, error, and exit status.
 
-        Supports all bash features: pipes, redirects, command substitution,
-        command chaining, and shell built-ins.
+        Commands run through bash. Simple read-only commands from the execution
+        policy run automatically; shell syntax and state-changing commands
+        require explicit approval before they run.
 
-        IMPORTANT — DO NOT run destructive commands:
-        - Do NOT run rm, mv, chmod, chown, dd, kill, killall, mkfs, pkill, reboot, shutdown, sudo, truncate, or any command that modifies, moves, or deletes files or system state.
-        - Do NOT run git reset, git push --force, git clean, or any git operation that rewrites history or deletes work.
-        - Do NOT run npm install, pip install, uv add, or any package installation without explicit user confirmation.
-        - Do NOT run any command that could harm the user's system or data.
+        The policy is an approval gate, not a sandbox. Commands are still
+        executed with bash after approval.
 
         This is the only tool for browsing the filesystem and searching code.
         There are no separate grep/glob/ls tools — use bash for those operations:
@@ -37,11 +36,10 @@ class Bash(ToolSchema):
         Searching code (use ripgrep, it respects .gitignore and is fastest on large trees):
         - rg --line-number --no-heading --color=never '<pattern>' <path>
         - Restrict to matching files with --glob, e.g. rg --line-number '<pattern>' --glob '*.py' <path>
-        - Pipe large results through head, e.g. rg --line-number '<pattern>' <path> | head -50
+        - Limit large results with rg's own flags or request approval for a pipeline.
 
         Finding files by name or glob pattern:
         - rg --files --glob '<pattern>' <path>   (respects .gitignore)
-        - Or shell globbing: shopt -s globstar; ls <path>/**/*.py
         - Or find <path> -name '*.py' when you need more control
 
         Listing a directory:
@@ -60,12 +58,9 @@ class Bash(ToolSchema):
         - git diff
         - git log --oneline -5
         - rg --line-number --no-heading 'def run' src/
-        - rg --files --glob '*.py' rich_ui/ | head -20
+        - rg --files --glob '*.py' rich_ui/
         - ls -la
-        - echo hello | tr a-z A-Z
-        - python3 -m py_compile src/main.py
         - ruff check src/
-        - npm run build
         """)
 
     def json_schema(self) -> Dict[str, Any]:
@@ -106,6 +101,7 @@ class Bash(ToolSchema):
         cwd: Optional[str] = None,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
         status_callback: Optional[Callable[..., Any]] = None,
+        _permission_callback: Optional[Callable[[str, str], bool]] = None,
     ) -> str:
         validation_error = self._validate_cwd(cwd)
         if validation_error:
@@ -117,6 +113,18 @@ class Bash(ToolSchema):
 
         if not command or not command.strip():
             return "Command failed: command must not be empty"
+
+        permission = CommandPermissionManager().classify(command)
+        if permission.decision is PermissionDecision.REJECT:
+            return f"Command rejected by permission policy: {permission.reason}"
+        if permission.decision is PermissionDecision.ASK:
+            if _permission_callback is None:
+                return (
+                    "Command rejected: explicit user permission is required: "
+                    f"{permission.reason}"
+                )
+            if not _permission_callback(command, permission.reason):
+                return "Command rejected: user denied permission"
 
         try:
             if status_callback:
