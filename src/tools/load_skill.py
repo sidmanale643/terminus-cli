@@ -38,20 +38,19 @@ class LoadSkill(ToolSchema):
             },
         }
 
-    def run(self, name: str, **kwargs):
+    def run(self, name: str, _agent=None):
         from src.utils import discover_skills
 
-        agent = kwargs.get("_agent")
-        if agent is None:
+        if _agent is None:
             return "Error: load_skill must be called from an agent context."
 
-        skills = discover_skills(agent.cwd)
+        skills = discover_skills(_agent.cwd)
         match = next((skill for skill in skills if skill["name"] == name), None)
         if match is None:
             available = ", ".join(skill["name"] for skill in skills) or "none"
             return f"Skill '{name}' not found. Available skills: {available}"
 
-        loaded = agent.load_skill(match)
+        loaded = _agent.load_skill(match)
         if not loaded:
             return f"Skill '{name}' is already loaded."
         return f"Skill '{name}' loaded successfully."

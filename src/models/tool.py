@@ -1,22 +1,17 @@
 from abc import ABC, abstractmethod
-import asyncio
+
 
 class ToolSchema(ABC):
-    def __init__():
+    def __init__(self):
         pass
-    
-    def description():
+
+    def description(self):
         pass
 
     @abstractmethod
-    def json_schema():
+    def json_schema(self):
         pass
 
     @abstractmethod
-    def run():
+    def run(self, **kwargs):
         pass
-
-    async def arun(self, **kwargs):
-        """Async execution. Default delegates to sync run in a thread.
-        Override for native async behavior."""
-        return await asyncio.to_thread(self.run, **kwargs)

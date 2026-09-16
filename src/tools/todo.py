@@ -6,6 +6,12 @@ from typing import List, Literal, Optional
 from src.models.tool import ToolSchema
 from src.constants import TODO_FILE
 
+VALID_STATUSES = {"pending", "in_progress", "completed"}
+
+
+class TodoStorageError(RuntimeError):
+    """Raised when the persisted todo list cannot be read or written."""
+
 
 def _load_todos() -> List[dict]:
     """Load todo items from the todos file."""
@@ -14,25 +20,50 @@ def _load_todos() -> List[dict]:
     try:
         with open(TODO_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data.get("items", [])
-    except (json.JSONDecodeError, IOError):
-        return []
+    except (json.JSONDecodeError, OSError) as exc:
+        raise TodoStorageError(f"Unable to read {TODO_FILE}: {exc}") from exc
+
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise TodoStorageError(f"Invalid todo file format: {TODO_FILE}")
+    if any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("task"), str)
+        or item.get("status") not in VALID_STATUSES
+        for item in items
+    ):
+        raise TodoStorageError(f"Invalid todo item in {TODO_FILE}")
+    return items
 
 
 def _save_todos(items: List[dict]) -> None:
-    """Save todo items to the todos file.
-    If all items are completed, delete the file instead."""
-    if not items or all(item.get("status") == "completed" for item in items):
-        if os.path.exists(TODO_FILE):
-            os.remove(TODO_FILE)
-        return
-    os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
-    with open(TODO_FILE, "w", encoding="utf-8") as f:
-        json.dump({"items": items}, f, indent=2)
+    """Save todo items to the todos file."""
+    try:
+        os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
+        with open(TODO_FILE, "w", encoding="utf-8") as f:
+            json.dump({"items": items}, f, indent=2)
+    except OSError as exc:
+        raise TodoStorageError(f"Unable to write {TODO_FILE}: {exc}") from exc
 
 
 def _dump_items(items: List[dict]) -> str:
     return json.dumps({"items": items})
+
+
+def _select_tasks(
+    task: Optional[str], tasks: Optional[List[str]]
+) -> tuple[Optional[List[str]], Optional[str]]:
+    if task is not None and tasks is not None:
+        return None, "Error: provide task or tasks, not both"
+
+    selected = [task] if task is not None else tasks
+    if not selected:
+        return None, "Error: task or tasks is required"
+    if not isinstance(selected, list) or any(
+        not isinstance(item, str) or not item.strip() for item in selected
+    ):
+        return None, "Error: task values must be non-empty strings"
+    return selected, None
 
 
 class TodoWrite(ToolSchema):
@@ -85,23 +116,25 @@ class TodoWrite(ToolSchema):
         tasks: Optional[List[str]] = None,
         status: Literal["pending", "in_progress", "completed"] = "pending",
     ):
-        task_list = []
-        if task:
-            task_list = [task]
-        elif tasks:
-            task_list = tasks
-        else:
-            return _dump_items(_load_todos())
+        task_list, error = _select_tasks(task, tasks)
+        if error:
+            return error
+        if status not in VALID_STATUSES:
+            return f"Error: invalid todo status: {status}"
 
-        items = _load_todos()
-        existing_tasks = {item["task"] for item in items}
+        try:
+            items = _load_todos()
+            existing_tasks = {item["task"] for item in items}
 
-        for t in task_list:
-            if t not in existing_tasks:
-                items.append({"task": t, "status": status})
+            for t in task_list:
+                if t not in existing_tasks:
+                    items.append({"task": t, "status": status})
+                    existing_tasks.add(t)
 
-        _save_todos(items)
-        return _dump_items(items)
+            _save_todos(items)
+            return _dump_items(items)
+        except TodoStorageError as exc:
+            return f"Error: {exc}"
 
 
 class TodoRead(ToolSchema):
@@ -128,8 +161,10 @@ class TodoRead(ToolSchema):
         }
 
     def run(self):
-        items = _load_todos()
-        return _dump_items(items)
+        try:
+            return _dump_items(_load_todos())
+        except TodoStorageError as exc:
+            return f"Error: {exc}"
 
 
 class TodoUpdate(ToolSchema):
@@ -181,27 +216,28 @@ class TodoUpdate(ToolSchema):
         task: Optional[str] = None,
         tasks: Optional[List[str]] = None,
     ):
-        task_list = []
-        if task:
-            task_list = [task]
-        elif tasks:
-            task_list = tasks
-        else:
-            return _dump_items(_load_todos())
+        task_list, error = _select_tasks(task, tasks)
+        if error:
+            return error
+        if status not in VALID_STATUSES:
+            return f"Error: invalid todo status: {status}"
 
-        items = _load_todos()
-        matched = set()
-        for t in task_list:
-            for item in items:
-                if item["task"] == t:
-                    item["status"] = status
-                    matched.add(t)
-                    break
+        try:
+            items = _load_todos()
+            matched = set()
+            for t in task_list:
+                for item in items:
+                    if item["task"] == t:
+                        item["status"] = status
+                        matched.add(t)
+                        break
 
-        unmatched = [t for t in task_list if t not in matched]
-        _save_todos(items)
+            unmatched = [t for t in task_list if t not in matched]
+            _save_todos(items)
 
-        result = {"items": items}
-        if unmatched:
-            result["unmatched"] = unmatched
-        return json.dumps(result)
+            result = {"items": items}
+            if unmatched:
+                result["unmatched"] = unmatched
+            return json.dumps(result)
+        except TodoStorageError as exc:
+            return f"Error: {exc}"
