@@ -14,7 +14,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from src.cli.terminal import (
+from terminus.cli.terminal import (
     MOUSE_REPORTING_OFF,
     MOUSE_REPORTING_ON,
     legacy_mouse_scroll_delta,
@@ -1103,8 +1103,6 @@ class MissionBoard:
             style=COLORS["muted"],
         )
         footer.append("   ·   ", style=COLORS["muted"])
-        footer.append("r", style=f"bold {COLORS['text']}")
-        footer.append(" replay mission   ·   ", style=COLORS["muted"])
         footer.append("q", style=f"bold {COLORS['text']}")
         footer.append(" quit", style=COLORS["muted"])
         return footer

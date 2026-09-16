@@ -20,8 +20,8 @@ dependencies = [
 dev = ["ruff>=0.14.2"]
 
 [project.scripts]
-terminus = "src.main:main"
+terminus = "terminus.__main__:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src*", "ui*", "rich_ui*"]
+where = ["src", "."]
+include = ["terminus*", "ui*", "rich_ui*"]

@@ -1,10 +1,3 @@
-"""Rich-based terminal UI for Terminus CLI.
-
-The display owns the terminal directly and prints synchronously (no socket/IPC).
-Keyboard input is line-based (Rich `Prompt`); double-Ctrl+C exit semantics are
-handled by `TerminusCLI`'s SIGINT handler in `src/cli/application.py`.
-"""
-
 import os
 import re
 import time
@@ -22,9 +15,13 @@ from rich.table import Table
 from rich.text import Text
 
 from rich_ui.worker_board import MissionBoard
-from src.cli.terminal import MOUSE_REPORTING_OFF, MOUSE_REPORTING_ON, read_terminal_line
-from src.commands.registry import CommandRegistry
-from src.models.llm import available_models
+from terminus.cli.terminal import (
+    MOUSE_REPORTING_OFF,
+    MOUSE_REPORTING_ON,
+    read_terminal_line,
+)
+from terminus.commands.registry import CommandRegistry
+from terminus.llm.models import available_models
 from ui.display_text import (
     ACTIVITY_LINE_MAX,
     humanize_output_lines,
@@ -62,8 +59,6 @@ TERMINUS_WORDMARK = [
 
 
 class ThinkingMessage:
-    """Mutable renderable used while provider reasoning streams in."""
-
     def __init__(self, content: str):
         self.content = content
 
@@ -78,15 +73,12 @@ class ThinkingMessage:
 
 
 class RichDisplay:
-    """Pure-Python terminal UI backed by Rich."""
-
     def __init__(self, stop_event=None):
         self._stop_event = stop_event
         self.console = Console(highlight=False)
         self.pending_exit = False
         self._queued_input: deque[str] = deque()
-        # True when the next queued input was already shown in the transcript
-        # (e.g. ask_question selection) and should not re-render as "You".
+
         self._queued_input_silent: deque[bool] = deque()
         self._board: MissionBoard | None = None
         self._footer = {"cwd": "", "model": "", "context_percent": 0.0}
@@ -99,14 +91,9 @@ class RichDisplay:
         self._last_stream_refresh = 0.0
         self._input_buffer = ""
         self._scroll_offset = 0
-        # When ask_question already rendered the prompt in-chat, skip re-dumping
-        # the same formatted text as the turn's final assistant response.
+
         self._suppress_next_response = False
         self._last_input_was_silent = False
-
-    # ------------------------------------------------------------------ #
-    # Text helpers
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _clean_text(value: str) -> str:
@@ -130,12 +117,7 @@ class RichDisplay:
         return one_line(clean, max_chars)
 
     def _tool_detail_lines(self, tool_name: str, args: dict) -> list[str]:
-        """Human secondary args for a tool call — never a raw JSON dump."""
         return tool_arg_detail_lines(tool_name, args or {})
-
-    # ------------------------------------------------------------------ #
-    # Output
-    # ------------------------------------------------------------------ #
 
     def _to_plain(self, renderable) -> str:
         if isinstance(renderable, Text):
@@ -151,7 +133,6 @@ class RichDisplay:
         ).rstrip()
 
     def _emit(self, renderable, markup: bool = False, style: str | None = None):
-        """Print, routing through the mission board when the theater is live."""
         if self._board is not None and self._board.is_live():
             self._board.log(self._to_plain(renderable), style=COLORS["text"])
             return
@@ -179,8 +160,7 @@ class RichDisplay:
     def _ensure_screen(self):
         if not self._interactive or not self.console.is_terminal or self._screen_active:
             return
-        # Alternate screen + SGR mouse (same modes as the React UI) so trackpad
-        # scroll arrives as parseable CSI instead of leaking into the composer.
+
         self.console.file.write("\x1b[?1049h\x1b[?25l" + MOUSE_REPORTING_ON)
         self.console.file.flush()
         self._screen_active = True
@@ -230,9 +210,7 @@ class RichDisplay:
     def _redraw(self, input_active: bool = False):
         if not self._interactive or not self.console.is_terminal:
             return
-        # Mission Control owns the alternate screen while Live is running.
-        # Painting the homepage here would yank the user out of the board
-        # (e.g. if a scroll-driven redraw races the mission input loop).
+
         if self._board is not None and self._board.is_live():
             return
         self._ensure_screen()
@@ -340,7 +318,7 @@ class RichDisplay:
         try_line = Text("Try  ", style=COLORS["muted"])
         try_line.append("Fix the failing tests", style=COLORS["text"])
         try_line.append("  ·  ", style=COLORS["border_hover"])
-        try_line.append("Explain @src/agent.py", style=COLORS["text"])
+        try_line.append("Explain @src/terminus/agent/core.py", style=COLORS["text"])
         right_rows.extend((try_line, Text()))
 
         commands = Text("Commands  ", style=COLORS["muted"])
@@ -487,13 +465,11 @@ class RichDisplay:
         return value
 
     def consume_last_input_was_silent(self) -> bool:
-        """Whether the last get_user_input value was already shown in the transcript."""
         silent = self._last_input_was_silent
         self._last_input_was_silent = False
         return silent
 
     def _ask_line(self, prompt_text: str, password: bool = False) -> str:
-        """Line prompt for menus/selectors; empty input returns ''."""
         if password:
             return Prompt.ask(prompt_text, password=True)
         self.console.print(Text(f"{prompt_text} ", style=COLORS["muted"]), end="")
@@ -574,7 +550,6 @@ class RichDisplay:
     def render_thinking(
         self, content: str, message: ThinkingMessage | None = None
     ) -> ThinkingMessage:
-        """Add or update one visible reasoning entry in the transcript."""
         bounded = self._bounded_text(content)
         if self._board is not None and self._board.is_live():
             if message is None:
@@ -620,10 +595,6 @@ class RichDisplay:
     def get_role_color(self, role: str) -> str:
         return get_role_color(role)
 
-    # ------------------------------------------------------------------ #
-    # Streaming
-    # ------------------------------------------------------------------ #
-
     def send_stream_chunk(self, chunk: str):
         chunk = self._clean_text(chunk)
         if not chunk:
@@ -665,10 +636,6 @@ class RichDisplay:
         self.console.print("")
         self.render_response(content)
 
-    # ------------------------------------------------------------------ #
-    # Tool events
-    # ------------------------------------------------------------------ #
-
     def send_tool_call(self, tool_name: str, label: str, args: dict):
         is_question_tool = tool_name == "ask_question"
         human_label = tool_call_label(tool_name, args, fallback=label or "")
@@ -681,7 +648,7 @@ class RichDisplay:
                     style=f"bold {COLORS['warning']}",
                 )
             )
-            # Secondary human details only — never raw JSON args.
+
             if not is_question_tool:
                 for detail in self._tool_detail_lines(tool_name, args or {}):
                     self._emit(
@@ -695,7 +662,7 @@ class RichDisplay:
         if self._board is not None:
             self._board.tool_output(tool_name, output)
             return
-        # ask_question already presents the full prompt + answer in-chat.
+
         if tool_name == "ask_question":
             return
         lines = humanize_output_lines(
@@ -705,28 +672,19 @@ class RichDisplay:
         )
         if not lines:
             return
-        # First line with arrow; continuation indented so multi-line output is readable.
+
         for index, line in enumerate(lines):
             prefix = "  ↳ " if index == 0 else "    "
-            # Soft cap per line for the transcript (full body still multi-line).
+
             display = one_line(line, ACTIVITY_LINE_MAX) if "\n" not in line else line
             if len(display) > ACTIVITY_LINE_MAX:
                 display = display[: ACTIVITY_LINE_MAX - 1] + "…"
             self._emit(Text(f"{prefix}{display}", style=COLORS["subtle"]), markup=False)
 
-    # ------------------------------------------------------------------ #
-    # Question prompt (ask_question tool)
-    # ------------------------------------------------------------------ #
-
     def send_question_request(self, args: dict):
         self._ask_questions(args)
 
     def _ask_questions(self, args: dict):
-        """Present clarifying questions in the chat transcript and collect answers.
-
-        Stays inside the interactive UI (no alternate-screen suspend / modal).
-        Answers are queued so the next agent turn receives them as user input.
-        """
         questions = self._normalize_question_request(args.get("questions") or [])
         if not questions:
             return
@@ -786,7 +744,7 @@ class RichDisplay:
             ),
             TRANSCRIPT_BLOCK_PADDING,
         )
-        # Mission board owns the terminal; print on the plain console while paused.
+
         if self._board is not None:
             self.console.print(renderable)
         else:
@@ -806,10 +764,8 @@ class RichDisplay:
             self._emit(renderable)
 
     def _ask_in_chat(self, prompt_text: str) -> str:
-        """Collect a selection via the normal composer, keeping the chat UI up."""
         hint = self._clean_text(prompt_text)
         if self._board is not None:
-            # Mission board owns the screen; fall back to a simple line prompt.
             self.console.print(Text(f"{hint} ", style=COLORS["muted"]), end="")
             return read_terminal_line()
 
@@ -838,6 +794,32 @@ class RichDisplay:
 
         self.console.print(Text(f"{hint} ", style=COLORS["muted"]), end="")
         return read_terminal_line()
+
+    def request_command_permission(self, command: str, reason: str) -> bool:
+        board_live = self._board is not None and self._board.is_live()
+        if board_live:
+            self._board.pause()
+
+        previous_generation = self._generation_active
+        self._generation_active = False
+        try:
+            body = Text()
+            body.append("Permission required", style=f"bold {COLORS['warning']}")
+            body.append(f"\n{self._clean_text(reason)}", style=COLORS["text"])
+            body.append(f"\n\n$ {self._clean_text(command)}", style=COLORS["subtle"])
+            renderable = Padding(body, TRANSCRIPT_BLOCK_PADDING)
+            if self._board is not None:
+                self.console.print(renderable)
+            else:
+                self._emit(renderable)
+            answer = self._ask_in_chat("Allow this command? [y/N]").strip().lower()
+            allowed = answer in {"y", "yes"}
+            self._render_question_selection("Allowed" if allowed else "Denied")
+            return allowed
+        finally:
+            self._generation_active = previous_generation
+            if board_live and self._board is not None:
+                self._board.resume()
 
     @staticmethod
     def _parse_option_numbers(raw: str, options: list[str]) -> list[str]:
@@ -878,10 +860,6 @@ class RichDisplay:
         normalized = [str(option).strip() for option in options if str(option).strip()]
         return (normalized + QUESTION_FALLBACK_OPTIONS)[:3]
 
-    # ------------------------------------------------------------------ #
-    # Mission Control
-    # ------------------------------------------------------------------ #
-
     def mission_start(
         self,
         title: str = "mission",
@@ -890,7 +868,7 @@ class RichDisplay:
         mission_id: str | None = None,
     ):
         self._suspend_screen()
-        # Prefer a short title derived from the goal when the generic default is used.
+
         resolved_title = (title or "mission").strip() or "mission"
         resolved_goal = (goal or "").strip()
         if resolved_title.lower() == "mission" and resolved_goal:
@@ -926,7 +904,6 @@ class RichDisplay:
         self._board = None
 
     def handle_mission_event(self, event):
-        """Reduce one persisted typed mission event into the active board."""
         if self._board is None or self._board.mission_id != event.mission_id:
             return False
         payload = event.payload
@@ -1010,10 +987,6 @@ class RichDisplay:
         else:
             self.print_message(self._preview_text(content))
 
-    # ------------------------------------------------------------------ #
-    # Panels / menus
-    # ------------------------------------------------------------------ #
-
     def render_help(self):
         table = Table(
             title="Available Commands", border_style=COLORS["border"], expand=True
@@ -1072,10 +1045,6 @@ class RichDisplay:
             todos_text.append(marker, style=marker_style)
             todos_text.append(f" {task}", style=COLORS["text"])
         self._emit(todos_text)
-
-    # ------------------------------------------------------------------ #
-    # Interactive selectors (blocking, like the React selectors)
-    # ------------------------------------------------------------------ #
 
     def select_model_ui(self, current_model: str = None):
         self._suspend_screen()
@@ -1166,14 +1135,10 @@ class RichDisplay:
             return None
         return provider_name, api_key.strip()
 
-    # ------------------------------------------------------------------ #
-    # Turn lifecycle
-    # ------------------------------------------------------------------ #
-
     def generation_start(self):
         self._generation_active = True
         self._stream_buffer = ""
-        # Avoid clobbering the Mission Control Live alternate screen.
+
         if self._board is None:
             self._redraw()
 
@@ -1182,10 +1147,6 @@ class RichDisplay:
         self._stream_buffer = ""
         if self._board is None:
             self._redraw()
-
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-    # ------------------------------------------------------------------ #
 
     def create_response_handler(self):
         return RichResponseHandler(self)
@@ -1204,8 +1165,6 @@ class RichDisplay:
 
 
 class RichResponseHandler:
-    """Status and event handler mirroring `ReactResponseHandler`."""
-
     def __init__(self, display: RichDisplay):
         self.display = display
         self._content: list[str] = []
@@ -1227,12 +1186,6 @@ class RichResponseHandler:
         return getattr(self.display, "_stream_buffer", "") or ""
 
     def _flush_stream_content(self):
-        """Commit streamed assistant text into the transcript at the current point.
-
-        Without this, tool calls / thinking land in `_transcript` immediately while
-        assistant text stays in `_stream_buffer` and is always painted at the end —
-        so intermediate narration dumps below later tools instead of before them.
-        """
         text = self._pending_stream_text()
         if not text.strip():
             self._content = []
@@ -1279,8 +1232,6 @@ class RichResponseHandler:
             self._flush_stream_content()
             self.display.render_error(message)
         elif is_thinking:
-            # Starting a new reasoning block — pin any prior assistant text first so
-            # order is assistant → thinking → tools, not tools then a late dump.
             if not self._thinking_active:
                 self._flush_stream_content()
             self._thinking_active = True
@@ -1317,10 +1268,8 @@ class RichResponseHandler:
         if pending.strip():
             self.display.send_stream_end(pending)
         elif response and str(response).strip():
-            # Non-streaming / already-flushed path: still show the final answer.
             self.display.send_stream_end(str(response))
         else:
-            # Clear any empty live stream buffer so it doesn't linger on redraw.
             if getattr(self.display, "_stream_buffer", ""):
                 self.display._stream_buffer = ""
                 if self.display._interactive and self.display.console.is_terminal:
