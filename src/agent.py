@@ -5,12 +5,12 @@ from src.models.llm import available_models
 from src.tools.tool_registry import ToolRegistry
 import json
 import time
-from src.prompts import PromptManager
+from src.prompts.system_prompt import get_system_prompt
 from dotenv import load_dotenv
 from src.session_manager import SessionHistory
 from src.llm_service.service import LLMService
-from src.constants import DEFAULT_PROVIDER, DEFAULT_MODEL
-from src.context_manager import ContextManager
+from src.constants import DEFAULT_MODEL
+from src.context_manager import ContextManager, SKILL_MESSAGE_PREFIX
 from src.prompts.init_prompt import get_init_prompt
 import os
 import re
@@ -19,9 +19,7 @@ load_dotenv(os.path.expanduser("~/.terminus/.env"))
 load_dotenv()
 
 MAX_ITERATIONS = 50
-TOOL_TRIM_THRESHOLD_RATIO = 0.50
 COMPACTION_THRESHOLD_RATIO = 0.75
-SKILL_MESSAGE_PREFIX = "Skill loaded:"
 ASK_QUESTION_TOOL_NAME = "ask_question"
 
 
@@ -44,32 +42,40 @@ class Agent:
         cwd: Optional working directory to use in system prompt. If None, uses os.getcwd()
         """
         self.id = id
-        self.cwd = cwd
+        self.cwd = os.path.abspath(cwd or os.getcwd())
         self.name = name
         self.description = description
         self.use_streaming = use_streaming
         self._subagent_counter = 0
         self.iteration = 0
-        self.max_iterations = max_iterations or MAX_ITERATIONS
+        self.max_iterations = (
+            MAX_ITERATIONS if max_iterations is None else max_iterations
+        )
         self.available_models = available_models
-        pm = PromptManager(cwd=cwd)
-        self.system_prompt = system_prompt if system_prompt else pm.get_system_prompt()
+        self.system_prompt = system_prompt or get_system_prompt(self.cwd)
         self.loaded_skills: dict[str, dict] = {}
 
         # Initialize LLM Service
         self.llm_service = LLMService()
-        self.llm_service.set_active_provider(DEFAULT_PROVIDER)
-
-        self.tool_registry = tool_registry if tool_registry else ToolRegistry(cwd=cwd)
+        self.tool_registry = tool_registry if tool_registry else ToolRegistry()
         self.model = DEFAULT_MODEL
 
+        model_context_size = next(
+            (
+                model.context_size
+                for model in self.available_models
+                if model.name == self.model
+            ),
+            200000,
+        )
         self.context_manager = ContextManager(
             llm_service=self.llm_service,
-            model_context_size=200000,
+            model_context_size=model_context_size,
             model_name=self.model,
         )
 
         self.session_manager = SessionHistory()
+        self._record_session_history = True
         self._load_model_preference()
 
     def __repr__(self):
@@ -81,8 +87,7 @@ class Agent:
 
     @context.setter
     def context(self, value):
-        self.context_manager.context = value
-        self.context_manager.update_context_size()
+        self.context_manager.replace_messages(value)
 
     @property
     def context_size(self):
@@ -102,14 +107,17 @@ class Agent:
         todo_display_callback=None,
         tool_call_callback=None,
         stop_event=None,
+        permission_callback=None,
     ):
         """Generate or update AGENTS.md for the current codebase."""
         original_context = self.context.copy()
         original_iteration = self.iteration
         original_loaded_skills = self.loaded_skills.copy()
+        original_recording = self._record_session_history
 
         self.context = []
         self.iteration = 0
+        self._record_session_history = False
         self.add_system_message()
 
         prompt = get_init_prompt()
@@ -120,6 +128,7 @@ class Agent:
                 todo_display_callback=todo_display_callback,
                 tool_call_callback=tool_call_callback,
                 stop_event=stop_event,
+                permission_callback=permission_callback,
             )
         except Exception as e:
             result = f"Error generating AGENTS.md: {e}"
@@ -128,6 +137,7 @@ class Agent:
             self.context = original_context
             self.iteration = original_iteration
             self.loaded_skills = original_loaded_skills
+            self._record_session_history = original_recording
 
         if result.startswith("Error generating AGENTS.md"):
             return result
@@ -135,9 +145,9 @@ class Agent:
         result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL)
         result = re.sub(r"<thinking>.*?</thinking>", "", result, flags=re.DOTALL)
 
-        filepath = os.path.join(os.getcwd(), "AGENTS.md")
+        filepath = os.path.join(self.cwd, "AGENTS.md")
         try:
-            with open(filepath, "w") as f:
+            with open(filepath, "w", encoding="utf-8") as f:
                 f.write(result)
         except Exception as e:
             return f"Error writing AGENTS.md: {e}"
@@ -147,7 +157,12 @@ class Agent:
         if system_prompt is None:
             system_prompt = self.system_prompt
         message = self.context_manager.add_message("system", system_prompt)
-        self.session_manager.insert_to_session_history("system", json.dumps(message))
+        self._record_message(message)
+        return message
+
+    def _record_message(self, message: dict) -> None:
+        if self._record_session_history:
+            self.session_manager.record_message(message)
 
     @staticmethod
     def _skill_message_content(skill: dict) -> str:
@@ -189,7 +204,7 @@ class Agent:
             "system",
             self._skill_message_content(skill),
         )
-        self.session_manager.insert_to_session_history("system", json.dumps(message))
+        self._record_message(message)
         self.loaded_skills[skill_name] = skill
         return True
 
@@ -205,7 +220,8 @@ class Agent:
 
     def add_user_message(self, content):
         message = self.context_manager.add_message("user", content)
-        self.session_manager.insert_to_session_history("user", json.dumps(message))
+        self._record_message(message)
+        return message
 
     def _load_model_preference(self):
         saved_name = self.session_manager.get_preference("last_model")
@@ -213,65 +229,97 @@ class Agent:
             return
         if saved_name == self.model:
             return
-        for m in self.available_models:
-            inst = m() if isinstance(m, type) else m
-            if inst.name == saved_name:
-                self.switch_model(inst)
+        for model in self.available_models:
+            if model.name == saved_name:
+                self.switch_model(model)
                 return
 
     def switch_model(self, model):
         if model not in self.available_models:
             raise ValueError("Select the correct model")
         self.model = model.name
-        service_provider = "openrouter"
-        self.llm_service.set_active_provider(service_provider)
-        self.llm_service.set_provider_routing(model.openrouter_provider)
         self.context_manager.model_context_size = model.context_size
         self.context_manager.model_name = model.name
         self.session_manager.set_preference("last_model", model.name)
 
+    @staticmethod
+    def _tool_call_field(tool_call, field, default=None):
+        if isinstance(tool_call, dict):
+            return tool_call.get(field, default)
+        return getattr(tool_call, field, default)
+
+    @classmethod
+    def _normalize_tool_call(cls, tool_call):
+        function = cls._tool_call_field(tool_call, "function")
+        call_id = cls._tool_call_field(tool_call, "id")
+        name = cls._tool_call_field(function, "name")
+        arguments = cls._tool_call_field(function, "arguments", "")
+
+        if not call_id or not name:
+            return None
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False, default=str)
+
+        return SimpleNamespace(
+            id=str(call_id),
+            function=SimpleNamespace(name=str(name), arguments=arguments),
+        )
+
+    @classmethod
+    def _serialize_tool_call(cls, tool_call):
+        normalized = cls._normalize_tool_call(tool_call)
+        if normalized is None:
+            return None
+        return {
+            "id": normalized.id,
+            "type": "function",
+            "function": {
+                "name": normalized.function.name,
+                "arguments": normalized.function.arguments,
+            },
+        }
+
     def add_assistant_message(self, content, tool_calls=None):
         extra = {}
         if tool_calls:
-            extra["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in (tool_calls if isinstance(tool_calls, list) else [tool_calls])
+            serialized_calls = [
+                self._serialize_tool_call(tool_call)
+                for tool_call in (
+                    tool_calls if isinstance(tool_calls, list) else [tool_calls]
+                )
             ]
+            extra["tool_calls"] = [call for call in serialized_calls if call]
+            if not extra["tool_calls"]:
+                extra = {}
         message = self.context_manager.add_message("assistant", content, **extra)
-        self.session_manager.insert_to_session_history("assistant", json.dumps(message))
+        self._record_message(message)
+        return message
 
     def add_tool_message(self, tool_call, tool_output):
+        normalized = self._normalize_tool_call(tool_call)
+        if normalized is None:
+            raise ValueError("tool messages require a valid tool call id and name")
+        if not isinstance(tool_output, str):
+            tool_output = json.dumps(tool_output, ensure_ascii=False, default=str)
         message = self.context_manager.add_message(
             "tool",
             tool_output,
-            tool_call_id=tool_call.id,
-            name=tool_call.function.name,
+            tool_call_id=normalized.id,
+            name=normalized.function.name,
         )
-        self.session_manager.insert_to_session_history("tool", json.dumps(message))
-
-    def update_context_size(self):
-        self.context_manager.update_context_size()
+        self._record_message(message)
+        return message
 
     def _maybe_compact_context(self, status_callback=None):
-        if self.context_manager.should_compact(TOOL_TRIM_THRESHOLD_RATIO):
-            removed = self.context_manager.trim_raw_tool_outputs()
-            if removed and status_callback:
-                status_callback(f"trimmed {removed} tool outputs", is_thinking=False)
-
-        if self.context_manager.should_compact(COMPACTION_THRESHOLD_RATIO):
+        if not self.context_manager.should_compact(COMPACTION_THRESHOLD_RATIO):
+            return
+        if status_callback:
+            status_callback("compacting context", is_thinking=False)
+        compacted = self.context_manager.compact()
+        if compacted:
             if status_callback:
-                status_callback("compacting context", is_thinking=False)
-            result = self.context_manager.compact()
-            if result and status_callback:
                 status_callback(
-                    f"Context compacted: {result['before_count']} → {result['after_count']} messages",
+                    f"Context compacted: {compacted['before_count']} → {compacted['after_count']} messages",
                     is_thinking=False,
                     is_alert=True,
                 )
@@ -279,25 +327,13 @@ class Agent:
     def get_session_history(self, limit=None):
         return self.session_manager.retrieve_session_history(limit)
 
-    def clear_session(self):
+    def clear_session(self, add_system: bool = True):
         self.session_manager.clear_session_history()
         self.context_manager.clear()
         self.loaded_skills.clear()
         self.iteration = 0
-        self.add_system_message()
-
-    def load_session(self, name):
-        chat_history = self.session_manager.retrieve_chat_history(name=name, limit=1)
-        if chat_history:
-            self.clear_session()
-            messages = chat_history[0]["chat_history"]
-            self.context_manager.replace_messages(messages)
-            self.session_manager.insert_many_to_session_history(
-                (message["role"], json.dumps(message)) for message in messages
-            )
-            self._restore_loaded_skills_from_context()
-            return True
-        return False
+        if add_system:
+            self.add_system_message()
 
     def display_tool(self, tool_name: str, tool_args: dict = None):
         """Generate a human-readable label for tool usage (never raw JSON)."""
@@ -317,6 +353,7 @@ class Agent:
         final_tool_calls,
         tool_call_callback=None,
         status_callback=None,
+        invalid_tool_results=None,
     ) -> str | None:
         question_call = next(
             (
@@ -330,10 +367,13 @@ class Agent:
             return None
 
         tool_call, tool_args = question_call
-        question_output = self._run_tool_for_current_turn(
-            tool_call.function.name,
-            **tool_args,
-        )
+        try:
+            question_output = self._run_tool_for_current_turn(
+                tool_call.function.name,
+                **tool_args,
+            )
+        except Exception as exc:
+            question_output = f"Error executing tool: {exc}"
         if tool_call_callback:
             tool_call_callback(
                 tool_name=tool_call.function.name,
@@ -346,18 +386,70 @@ class Agent:
             )
 
         self.add_assistant_message(content="", tool_calls=final_tool_calls)
-        for current_tool_call, _ in parsed_calls:
-            if current_tool_call.id == tool_call.id:
-                self.add_tool_message(current_tool_call, question_output)
-            else:
+        tool_outputs = {
+            current_tool_call.id: (
+                question_output
+                if current_tool_call.id == tool_call.id
+                else "Skipped because ask_question ended the turn and is waiting for the user's answer."
+            )
+            for current_tool_call, _ in parsed_calls
+        }
+        tool_outputs.update(dict(invalid_tool_results or []))
+        for current_tool_call in final_tool_calls:
+            if current_tool_call.id in tool_outputs:
                 self.add_tool_message(
                     current_tool_call,
-                    "Skipped because ask_question ended the turn and is waiting for the user's answer.",
+                    tool_outputs[current_tool_call.id],
                 )
         self.add_assistant_message(question_output)
-        self.update_context_size()
 
         return question_output
+
+    def _parse_tool_calls(self, tool_calls, status_callback=None):
+        """Normalize calls and keep malformed calls paired with an error result."""
+        normalized_calls = []
+        parsed_calls = []
+        invalid_tool_results = []
+
+        for tool_call in tool_calls:
+            normalized = self._normalize_tool_call(tool_call)
+            if normalized is None:
+                if status_callback:
+                    status_callback(
+                        "skipped malformed tool call: missing id or function name",
+                        is_thinking=False,
+                    )
+                continue
+
+            normalized_calls.append(normalized)
+            try:
+                tool_args = json.loads(normalized.function.arguments)
+            except (TypeError, json.JSONDecodeError) as exc:
+                error = f"Error: malformed arguments for tool '{normalized.function.name}': {exc}"
+                invalid_tool_results.append((normalized.id, error))
+                if status_callback:
+                    status_callback(
+                        f"malformed tool call: {normalized.function.name}",
+                        is_thinking=False,
+                    )
+                continue
+
+            if not isinstance(tool_args, dict):
+                error = (
+                    f"Error: malformed arguments for tool '{normalized.function.name}': "
+                    "expected a JSON object"
+                )
+                invalid_tool_results.append((normalized.id, error))
+                if status_callback:
+                    status_callback(
+                        f"malformed tool call: {normalized.function.name}",
+                        is_thinking=False,
+                    )
+                continue
+
+            parsed_calls.append((normalized, tool_args))
+
+        return normalized_calls, parsed_calls, invalid_tool_results
 
     def run(
         self,
@@ -371,6 +463,7 @@ class Agent:
         stream_callback=None,
         response_format: dict | None = None,
         usage_callback=None,
+        permission_callback=None,
     ):
         """
         Run the agent with a user message
@@ -394,7 +487,6 @@ class Agent:
         # print("[INIT] System prompt added to context.")
 
         self.add_user_message(user_message)
-        self.update_context_size()
         self.iteration = 0
 
         while self.iteration < self.max_iterations:
@@ -423,6 +515,14 @@ class Agent:
                     ):
                         if stop_event.is_set():
                             raise KeyboardInterrupt()
+                        chunk_error = self._tool_call_field(response_chunk, "error")
+                        if chunk_error:
+                            raise RuntimeError(f"LLM stream error: {chunk_error}")
+                        if (
+                            self._tool_call_field(response_chunk, "stop_reason")
+                            == "error"
+                        ):
+                            raise RuntimeError("LLM stream ended with an error")
 
                         if usage_callback and (
                             response_chunk.prompt_tokens is not None
@@ -447,23 +547,27 @@ class Agent:
                                 stream_callback(response_chunk.content)
 
                         for tool_call in response_chunk.tool_calls or []:
-                            index = getattr(tool_call, "index", 0)
+                            index = self._tool_call_field(tool_call, "index", 0)
+                            if index is None:
+                                index = 0
                             current = streamed_tool_calls.setdefault(
                                 index,
                                 {
-                                    "id": getattr(tool_call, "id", None),
+                                    "id": self._tool_call_field(tool_call, "id"),
                                     "name": "",
                                     "arguments": "",
                                 },
                             )
                             current["id"] = (
-                                getattr(tool_call, "id", None) or current["id"]
+                                self._tool_call_field(tool_call, "id") or current["id"]
                             )
-                            function = getattr(tool_call, "function", None)
+                            function = self._tool_call_field(tool_call, "function")
                             if function:
-                                current["name"] += getattr(function, "name", None) or ""
+                                current["name"] += (
+                                    self._tool_call_field(function, "name") or ""
+                                )
                                 current["arguments"] += (
-                                    getattr(function, "arguments", None) or ""
+                                    self._tool_call_field(function, "arguments") or ""
                                 )
 
                     final_tool_calls = [
@@ -504,7 +608,7 @@ class Agent:
                         status_callback(response.reasoning, is_thinking=True)
 
                     accumulated_content = response.content or ""
-                    final_tool_calls = response.tool_calls or []
+                    final_tool_calls = list(response.tool_calls or [])
 
                 if stop_event.is_set():
                     raise KeyboardInterrupt()
@@ -516,25 +620,16 @@ class Agent:
 
             # Check if we have tool calls
             if final_tool_calls and len(final_tool_calls) > 0:
-                # Parse all tool arguments first
-                parsed_calls = []
-                for tool_call in final_tool_calls:
-                    try:
-                        tool_args = json.loads(tool_call.function.arguments)
-                        parsed_calls.append((tool_call, tool_args))
-                    except json.JSONDecodeError:
-                        if status_callback:
-                            status_callback(
-                                f"skipped malformed tool call: {tool_call.function.name}",
-                                is_thinking=False,
-                            )
-                        continue
+                normalized_calls, parsed_calls, invalid_tool_results = (
+                    self._parse_tool_calls(final_tool_calls, status_callback)
+                )
 
                 ask_question_result = self._try_complete_ask_question_turn(
                     parsed_calls,
-                    final_tool_calls,
+                    normalized_calls,
                     tool_call_callback=tool_call_callback,
                     status_callback=status_callback,
+                    invalid_tool_results=invalid_tool_results,
                 )
                 if ask_question_result is not None:
                     return ask_question_result
@@ -553,152 +648,167 @@ class Agent:
                     elif status_callback:
                         status_callback(status_message, is_thinking=False)
 
-                # Execute all tools and collect outputs
-                tool_results = []
-                for tool_call, tool_args in parsed_calls:
-                    try:
-                        if stop_event.is_set():
-                            raise KeyboardInterrupt()
+                # Store the assistant call before executing tools so each
+                # persisted call is followed by a matching tool result.
+                self.add_assistant_message(
+                    content=accumulated_content, tool_calls=normalized_calls
+                )
 
-                        worker_id = None
-                        if tool_call.function.name == "subagent":
-                            self._subagent_counter += 1
-                            worker_id = f"subagent-{self._subagent_counter}"
-                            task_text = str(tool_args.get("task", "") or "")
-                            role = "worker"
-                            role_name = role.title()
-                            if worker_event_callback:
-                                worker_event_callback(
-                                    "worker_spawned",
-                                    {
-                                        "worker_id": worker_id,
-                                        "name": role_name,
-                                        "description": task_text,
-                                        "role": role,
-                                    },
-                                )
+                invalid_outputs = dict(invalid_tool_results)
+                parsed_args = {
+                    tool_call.id: tool_args for tool_call, tool_args in parsed_calls
+                }
 
-                            def subagent_status(message, is_thinking=False, **kwargs):
-                                if not worker_event_callback:
-                                    if status_callback:
-                                        status_callback(
-                                            message, is_thinking=is_thinking, **kwargs
-                                        )
-                                    return
-                                worker_event_callback(
-                                    "worker_detail"
-                                    if is_thinking
-                                    else "worker_notification",
-                                    {
-                                        "worker_id": worker_id,
-                                        "detail_type": "thinking"
-                                        if is_thinking
-                                        else None,
-                                        "content": message,
-                                        "status": "running",
-                                        "summary": message,
-                                        "timestamp": time.time(),
-                                    },
-                                )
+                for tool_call in normalized_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = parsed_args.get(tool_call.id)
+                    if tool_args is None:
+                        # Malformed arguments still get a protocol-valid result.
+                        self.add_tool_message(tool_call, invalid_outputs[tool_call.id])
+                        continue
 
-                            def subagent_tool_call(tool_name, label, args):
-                                if worker_event_callback:
-                                    worker_event_callback(
-                                        "worker_detail",
-                                        {
-                                            "worker_id": worker_id,
-                                            "detail_type": "tool_call",
-                                            "content": label,
-                                            "tool_name": tool_name,
-                                            "args": args,
-                                            "timestamp": time.time(),
-                                        },
-                                    )
+                    if stop_event.is_set():
+                        raise KeyboardInterrupt()
 
-                            def subagent_tool_output(tool_name, output):
-                                if worker_event_callback:
-                                    worker_event_callback(
-                                        "worker_detail",
-                                        {
-                                            "worker_id": worker_id,
-                                            "detail_type": "tool_output",
-                                            "content": str(output),
-                                            "tool_name": tool_name,
-                                            "timestamp": time.time(),
-                                        },
-                                    )
-
-                            tool_args.update(
-                                _status_callback=subagent_status,
-                                _tool_call_callback=subagent_tool_call,
-                                _tool_output_callback=subagent_tool_output,
-                                _stop_event=stop_event,
-                            )
-
-                        if tool_call.function.name == "load_skill":
-                            tool_args["_agent"] = self
-
-                        tool_output = self._run_tool_for_current_turn(
-                            tool_call.function.name,
-                            **tool_args,
-                        )
-                        # print(f"[TOOL] Tool '{tool_call.function.name}' executed successfully.")
-
-                        if tool_output_callback:
-                            tool_output_callback(tool_call.function.name, tool_output)
-
-                        if worker_id and worker_event_callback:
+                    worker_id = None
+                    if tool_name == "subagent":
+                        self._subagent_counter += 1
+                        worker_id = f"subagent-{self._subagent_counter}"
+                        task_text = str(tool_args.get("task", "") or "")
+                        role = "worker"
+                        role_name = role.title()
+                        if worker_event_callback:
                             worker_event_callback(
-                                "worker_status",
+                                "worker_spawned",
                                 {
                                     "worker_id": worker_id,
-                                    "status": "completed",
-                                    "result": str(tool_output),
+                                    "name": role_name,
+                                    "description": task_text,
+                                    "role": role,
+                                },
+                            )
+
+                        def subagent_status(message, is_thinking=False, **kwargs):
+                            if not worker_event_callback:
+                                if status_callback:
+                                    status_callback(
+                                        message, is_thinking=is_thinking, **kwargs
+                                    )
+                                return
+                            worker_event_callback(
+                                "worker_detail"
+                                if is_thinking
+                                else "worker_notification",
+                                {
+                                    "worker_id": worker_id,
+                                    "detail_type": "thinking" if is_thinking else None,
+                                    "content": message,
+                                    "status": "running",
+                                    "summary": message,
                                     "timestamp": time.time(),
                                 },
                             )
 
-                        # If this is a todo tool call, display the todo list
-                        if (
-                            tool_call.function.name
-                            in ("todo_write", "todo_update", "todo_read")
-                            and todo_display_callback
-                        ):
-                            try:
-                                todo_data = json.loads(tool_output)
-                                if "items" in todo_data:
-                                    todo_display_callback(todo_data["items"])
-                            except (json.JSONDecodeError, KeyError):
-                                pass  # Silently fail if todo output is not in expected format
+                        def subagent_tool_call(tool_name, label, args):
+                            if worker_event_callback:
+                                worker_event_callback(
+                                    "worker_detail",
+                                    {
+                                        "worker_id": worker_id,
+                                        "detail_type": "tool_call",
+                                        "content": label,
+                                        "tool_name": tool_name,
+                                        "args": args,
+                                        "timestamp": time.time(),
+                                    },
+                                )
 
-                        tool_results.append((tool_call, tool_output, False))
-                    except Exception as e:
-                        # print(f"[ERROR] Tool execution failed: {e}")
-                        tool_error = f"Error executing tool: {str(e)}"
+                        def subagent_tool_output(tool_name, output):
+                            if worker_event_callback:
+                                worker_event_callback(
+                                    "worker_detail",
+                                    {
+                                        "worker_id": worker_id,
+                                        "detail_type": "tool_output",
+                                        "content": str(output),
+                                        "tool_name": tool_name,
+                                        "timestamp": time.time(),
+                                    },
+                                )
 
+                        tool_args.update(
+                            _status_callback=subagent_status,
+                            _tool_call_callback=subagent_tool_call,
+                            _tool_output_callback=subagent_tool_output,
+                            _stop_event=stop_event,
+                            _permission_callback=permission_callback,
+                            _cwd=self.cwd,
+                        )
+
+                    if tool_name == "load_skill":
+                        tool_args["_agent"] = self
+                    if tool_name == "bash":
+                        tool_args["_permission_callback"] = permission_callback
+                        tool_args["cwd"] = tool_args.get("cwd") or self.cwd
+
+                    try:
+                        tool_output = self._run_tool_for_current_turn(
+                            tool_name,
+                            **tool_args,
+                        )
+                    except Exception as exc:
+                        tool_output = f"Error executing tool: {exc}"
+                        tool_failed = True
+                    else:
+                        tool_failed = False
+
+                    # Keep the assistant/tool exchange adjacent and complete.
+                    self.add_tool_message(tool_call, tool_output)
+
+                    if tool_failed:
                         if worker_id and worker_event_callback:
                             worker_event_callback(
                                 "worker_status",
                                 {
                                     "worker_id": worker_id,
                                     "status": "failed",
-                                    "result": str(e),
+                                    "result": str(tool_output),
                                     "timestamp": time.time(),
                                 },
                             )
+                        continue
 
-                        tool_results.append((tool_call, tool_error, True))
+                    if tool_output_callback:
+                        tool_output_callback(tool_name, tool_output)
 
-                # Add assistant message with all tool calls
-                self.add_assistant_message(
-                    content=accumulated_content, tool_calls=final_tool_calls
-                )
+                    if worker_id and worker_event_callback:
+                        worker_event_callback(
+                            "worker_status",
+                            {
+                                "worker_id": worker_id,
+                                "status": "completed",
+                                "result": str(tool_output),
+                                "timestamp": time.time(),
+                            },
+                        )
 
-                # Add all tool messages
-                for tool_call, output, _ in tool_results:
-                    self.add_tool_message(tool_call, output)
+                    # If this is a todo tool call, display the todo list.
+                    if (
+                        tool_name in ("todo_write", "todo_update", "todo_read")
+                        and todo_display_callback
+                    ):
+                        try:
+                            todo_text = (
+                                tool_output
+                                if isinstance(tool_output, str)
+                                else json.dumps(tool_output, default=str)
+                            )
+                            todo_data = json.loads(todo_text)
+                            if isinstance(todo_data, dict) and "items" in todo_data:
+                                todo_display_callback(todo_data["items"])
+                        except (TypeError, json.JSONDecodeError):
+                            pass
 
-                self.update_context_size()
                 self.iteration += 1
 
             else:
@@ -706,7 +816,6 @@ class Agent:
                 # print(f"[OUTPUT] Final content: {accumulated_content[:200]}{'...' if len(accumulated_content) > 200 else ''}")
 
                 self.add_assistant_message(accumulated_content)
-                self.update_context_size()
 
                 return accumulated_content
 

@@ -39,11 +39,20 @@ class SubAgent(ToolSchema):
             },
         }
 
-    def run(self, task: str, _status_callback=None, _stop_event=None, _tool_call_callback=None, _tool_output_callback=None):
+    def run(
+        self,
+        task: str,
+        _status_callback=None,
+        _stop_event=None,
+        _tool_call_callback=None,
+        _tool_output_callback=None,
+        _permission_callback=None,
+        _cwd=None,
+    ):
         try:
             from src.agent import Agent
 
-            self.subagent = Agent()
+            self.subagent = Agent(cwd=_cwd)
             self.subagent.add_system_message()
 
             result = self.subagent.run(
@@ -52,6 +61,7 @@ class SubAgent(ToolSchema):
                 tool_call_callback=_tool_call_callback,
                 tool_output_callback=_tool_output_callback,
                 stop_event=_stop_event,
+                permission_callback=_permission_callback,
             )
 
             return result
