@@ -1,5 +1,4 @@
 import argparse
-import sys
 import os
 import json
 import signal
@@ -38,7 +37,6 @@ class TerminusCLI:
         self.last_sigint_time = 0.0
         self.sigint_grace_window = 2.0  # seconds to treat double Ctrl+C as exit
         self._last_response: str | None = None
-        self._prev_sigint = signal.getsignal(signal.SIGINT)
         self._shutting_down = False
         signal.signal(signal.SIGINT, self._handle_sigint)
 
@@ -61,29 +59,21 @@ class TerminusCLI:
 
     def begin_shutdown(self):
         """Prevent late SIGINTs from interrupting interpreter teardown."""
+        if self._shutting_down:
+            return
         self._shutting_down = True
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        try:
-            self.agent.tool_registry.shutdown()
-        except Exception:
-            pass
         if self._active_mission is not None:
             self._active_mission.cancel()
             self._active_mission = None
-        try:
-            self.mission_store.close()
-        except Exception:
-            pass
+        self.mission_store.close()
 
     def _exit_app(self):
-        self.begin_shutdown()
         self.display.clear_pending_exit()
         self.display.print_centered(
             "Shutting down TERMINUS...", style=f"bold {COLORS['text']}"
         )
-        if hasattr(self.display, "shutdown"):
-            self.display.shutdown()
-        sys.exit(0)
+        raise SystemExit(0)
 
     def _emit_worker_event(self, event_type: str, data: dict):
         """Forward subagent lifecycle events to the display."""
@@ -119,8 +109,7 @@ class TerminusCLI:
         method(**{key: value for key, value in data.items() if key in allowed})
 
     def _emit_mission_event(self, event):
-        if hasattr(self.display, "handle_mission_event"):
-            self.display.handle_mission_event(event)
+        self.display.handle_mission_event(event)
 
     def process_query(self, user_input: str):
         """Process user query and coordinate with agent and display"""
@@ -155,6 +144,7 @@ class TerminusCLI:
                     stop_event=self.stop_event,
                     worker_event_callback=self._emit_worker_event,
                     stream_callback=handler.handle_streaming,
+                    permission_callback=self.display.request_command_permission,
                 )
 
             # Render final response after live display stops to keep content visible
@@ -183,33 +173,39 @@ class TerminusCLI:
 
     def execute_command(self, command: str) -> bool:
         """Execute a slash command. Returns True if should continue loop, False if should exit"""
+        command = command.strip()
+        parts = command.split(maxsplit=1)
+        token = parts[0].lower() if parts else ""
+        command_spec = CommandRegistry.resolve(token)
+        command_name = command_spec.name if command_spec else None
+        argument = parts[1] if len(parts) > 1 else ""
 
         # Exit commands
-        if command.lower() in ["exit", "quit", "/exit", "/quit", "q"]:
+        if command_name == "/exit" and not argument:
             self.display.print_centered(
                 "Shutting down TERMINUS...", style=f"bold {COLORS['text']}"
             )
             return False
 
         # Reset session
-        if command.lower() == "/reset":
+        if command_name == "/reset" and not argument:
             self.agent.clear_session()
             self.display.render_success_message("Session reset successfully")
             return True
 
         # Clear screen
-        if command.lower() in ["/clear", "clear"]:
+        if command_name == "/clear" and not argument:
             self.display.clear_screen()
             self.display.render_banner()
             return True
 
         # Display context size
-        if command.lower() == "/context_size":
+        if command_name == "/context_size" and not argument:
             self.display.print_message(f"Context Size: {self.agent.context_size}")
             return True
 
         # Compact conversation context
-        if command.lower() == "/compact":
+        if command_name == "/compact" and not argument:
             result = self.agent.context_manager.compact()
             if result is None:
                 self.display.print_message(
@@ -226,18 +222,18 @@ class TerminusCLI:
             return True
 
         # Display history
-        if command.lower() == "/history":
+        if command_name == "/history" and not argument:
             self._display_history()
             return True
 
             # Display help
-        if command.lower() == "/help":
+        if command_name == "/help" and not argument:
             self.display.render_help()
             return True
 
         # Durable Mission Control runtime and audit commands.
-        if command.lower().startswith("/mission"):
-            task = command[len("/mission") :].strip()
+        if command_name == "/mission":
+            task = argument.strip()
             if not task:
                 self.display.render_error(
                     "Usage: /mission <goal> | /mission list | /mission replay <id>"
@@ -267,7 +263,7 @@ class TerminusCLI:
             return True
 
         # Copy last response to clipboard
-        if command.lower() == "/copy":
+        if command_name == "/copy" and not argument:
             if self._last_response:
                 if copy_to_clipboard(self._last_response):
                     self.display.render_success_message(
@@ -281,7 +277,7 @@ class TerminusCLI:
                 self.display.render_error("No response to copy yet")
             return True
 
-        if command.lower() == "/init":
+        if command_name == "/init" and not argument:
             handler = self.display.create_response_handler()
             with handler:
                 result = self.agent.init(
@@ -291,16 +287,17 @@ class TerminusCLI:
                     ),
                     tool_call_callback=handler.display_tool_call,
                     stop_event=self.stop_event,
+                    permission_callback=self.display.request_command_permission,
                 )
             handler.render_final_response(result)
             return True
 
             # Display context
-        if command.lower() == "/context":
+        if command_name == "/context" and not argument:
             self.display.print_message(str(self.agent.context))
             return True
 
-        if command.lower() == "/models":
+        if command_name == "/models" and not argument:
             selected = self.display.select_model_ui(current_model=self.agent.model)
             if selected:
                 self.agent.switch_model(selected)
@@ -312,7 +309,7 @@ class TerminusCLI:
             return True
 
         # Connect provider and configure API key
-        if command.lower() == "/connect":
+        if command_name == "/connect" and not argument:
             try:
                 result = self.display.connect_provider_ui()
                 if result is None:
@@ -338,11 +335,8 @@ class TerminusCLI:
                 env_path = os.path.join(env_dir, ".env")
                 set_key(env_path, env_var, api_key)
                 os.environ[env_var] = api_key
-                if env_var == "OPEN_ROUTER_API_KEY":
-                    os.environ["OPENROUTER_API_KEY"] = api_key
-
                 # Update the provider's API key in-memory
-                self.agent.llm_service.set_provider_api_key(provider_name, api_key)
+                self.agent.llm_service.set_api_key(api_key)
                 self.display.render_success_message(
                     f"API key configured for {provider_name}. "
                     f"Use /models to switch to a {provider_name} model."
@@ -354,15 +348,14 @@ class TerminusCLI:
             return True
 
         # List available skills
-        if command.lower() == "/skills":
+        if command_name == "/skills" and not argument:
             skills = discover_skills(os.getcwd())
             skills = self.agent.annotate_skills(skills)
             self.display.render_skills(skills)
             return True
 
         # Load a skill by name
-        if command.lower() == "/skill" or command.lower().startswith("/skill "):
-            parts = command.strip().split(maxsplit=1)
+        if command_name == "/skill":
             skills = discover_skills(os.getcwd())
             skills = self.agent.annotate_skills(skills)
 
@@ -370,14 +363,14 @@ class TerminusCLI:
                 self.display.render_error("No skills found in .skills/ directory.")
                 return True
 
-            if len(parts) < 2:
+            if not argument:
                 selected = self.display.select_skill_ui(skills)
                 if selected:
                     self._load_skill(selected)
                 else:
                     self.display.print_message("[dim]Skill selection cancelled.[/dim]")
             else:
-                skill_name = parts[1]
+                skill_name = argument
                 match = next((s for s in skills if s["name"] == skill_name), None)
                 if match:
                     self._load_skill(match)
@@ -387,8 +380,8 @@ class TerminusCLI:
                     )
             return True
 
-        # Fallback: React owns command suggestions; unknown commands are explicit errors.
-        if command.startswith("/"):
+        # Unknown slash commands are explicit errors.
+        if token.startswith("/"):
             self.display.render_error(f"Unknown command: {command}")
             return True
 
@@ -467,7 +460,9 @@ class TerminusCLI:
             handler.render_final_response(outcome.summary)
             return
         if outcome.terminal:
-            self.display.mission_end(summary=outcome.summary, status=outcome.status.value)
+            self.display.mission_end(
+                summary=outcome.summary, status=outcome.status.value
+            )
             self._active_mission = None
             self.sigint_pending_exit = False
             self.display.clear_pending_exit()
@@ -525,8 +520,7 @@ class TerminusCLI:
 
     def run_interactive(self):
         """Run interactive mode with conversation loop"""
-        if hasattr(self.display, "start_interactive"):
-            self.display.start_interactive()
+        self.display.start_interactive()
         self.display.render_banner()
         while True:
             try:
@@ -546,42 +540,32 @@ class TerminusCLI:
 
                 # ask_question already paints the selection into the transcript;
                 # don't re-render the auto-queued answer as another "You" block.
-                silent = False
-                if hasattr(self.display, "consume_last_input_was_silent"):
-                    silent = self.display.consume_last_input_was_silent()
-                if not silent and hasattr(self.display, "render_user_message"):
+                silent = self.display.consume_last_input_was_silent()
+                if not silent:
                     self.display.render_user_message(user_input)
 
-                # Check if it's a registered slash command or exit alias
-                is_known_command = CommandRegistry.is_registered(
-                    user_input.lower().split()[0]
-                ) or user_input.lower().split()[0] in ["exit", "quit", "q", "clear"]
-                if is_known_command:
+                if CommandRegistry.is_command(user_input):
                     should_continue = self.execute_command(user_input)
                     if not should_continue:
                         break
                     continue
 
                 if self._active_mission is not None:
-                    if hasattr(self.display, "generation_start"):
-                        self.display.generation_start()
+                    self.display.generation_start()
                     try:
                         self.stop_event.clear()
                         self._run_mission_turn(user_input)
                     finally:
-                        if hasattr(self.display, "generation_end"):
-                            self.display.generation_end()
+                        self.display.generation_end()
                     self.display.print_newline()
                     continue
 
                 # Process as query
-                if hasattr(self.display, "generation_start"):
-                    self.display.generation_start()
+                self.display.generation_start()
                 try:
                     self.process_query(user_input)
                 finally:
-                    if hasattr(self.display, "generation_end"):
-                        self.display.generation_end()
+                    self.display.generation_end()
                 self.display.print_newline()
 
             except KeyboardInterrupt:
@@ -598,8 +582,7 @@ class TerminusCLI:
     def run_single_query(self, query: str):
         """Run a single query (useful for non-interactive mode)"""
         self.display.render_banner()
-        first = query.lower().split()[0] if query.strip() else ""
-        if CommandRegistry.is_registered(first):
+        if CommandRegistry.is_command(query):
             self.execute_command(query)
         else:
             self.process_query(query)
@@ -627,6 +610,4 @@ def main():
             cli.run_interactive()
     finally:
         cli.begin_shutdown()
-        # Graceful shutdown for React UI
-        if hasattr(cli.display, "shutdown"):
-            cli.display.shutdown()
+        cli.display.shutdown()

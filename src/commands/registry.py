@@ -22,32 +22,43 @@ class CommandRegistry:
         aliases: list[str] | None = None,
     ) -> None:
         cmd = Command(
-            name=name,
+            name=name.strip().lower(),
             description=description,
-            usage=usage or name,
-            aliases=aliases or [],
+            usage=usage or name.strip().lower(),
+            aliases=[alias.strip().lower() for alias in aliases or []],
         )
-        cls._commands[name] = cmd
+        cls._commands[cmd.name] = cmd
         for alias in cmd.aliases:
             cls._commands[alias] = cmd
 
     @classmethod
     def all(cls) -> list[Command]:
-        seen: set[int] = set()
-        result: list[Command] = []
-        for cmd in cls._commands.values():
-            if id(cmd) not in seen:
-                seen.add(id(cmd))
-                result.append(cmd)
-        return sorted(result, key=lambda c: c.name)
+        commands = {command.name: command for command in cls._commands.values()}
+        return sorted(commands.values(), key=lambda command: command.name)
+
+    @classmethod
+    def resolve(cls, name: str) -> Command | None:
+        """Resolve a command token, including aliases, to its primary command."""
+        return cls._commands.get(name.strip().lower())
+
+    @classmethod
+    def command_token(cls, text: str) -> str:
+        """Return the normalized first token from a command/query string."""
+        return text.strip().split(maxsplit=1)[0].lower() if text.strip() else ""
+
+    @classmethod
+    def is_command(cls, text: str) -> bool:
+        """Whether input should be routed through the command dispatcher."""
+        token = cls.command_token(text)
+        return bool(token) and (token.startswith("/") or cls.resolve(token) is not None)
 
     @classmethod
     def get(cls, name: str) -> Command | None:
-        return cls._commands.get(name)
+        return cls.resolve(name)
 
     @classmethod
     def is_registered(cls, name: str) -> bool:
-        return name in cls._commands
+        return cls.resolve(name) is not None
 
     @classmethod
     def names(cls) -> list[str]:
@@ -56,13 +67,7 @@ class CommandRegistry:
     @classmethod
     def command_names(cls) -> list[str]:
         """Return only primary command names (no aliases)."""
-        seen: set[int] = set()
-        result: list[str] = []
-        for cmd in cls._commands.values():
-            if id(cmd) not in seen:
-                seen.add(id(cmd))
-                result.append(cmd.name)
-        return sorted(result)
+        return [command.name for command in cls.all()]
 
 
 CommandRegistry.register("/help", "Show the command reference")
@@ -83,4 +88,6 @@ CommandRegistry.register("/skills", "List available skills")
 CommandRegistry.register("/skill", "Choose or load a skill by name", "/skill [name]")
 CommandRegistry.register("/connect", "Select provider and configure API key")
 CommandRegistry.register("/init", "Generate or update AGENTS.md")
-CommandRegistry.register("/exit", "Exit the program", aliases=["exit", "quit", "q"])
+CommandRegistry.register(
+    "/exit", "Exit the program", aliases=["exit", "/quit", "quit", "q"]
+)

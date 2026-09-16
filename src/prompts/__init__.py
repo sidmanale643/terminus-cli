@@ -1,3 +1,3 @@
-from .manager import PromptManager
+from .system_prompt import get_system_prompt
 
-__all__ = ["PromptManager"]
+__all__ = ["get_system_prompt"]
