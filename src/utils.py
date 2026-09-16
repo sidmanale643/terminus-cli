@@ -4,37 +4,22 @@ import os
 
 
 def parse_file_references(user_input: str):
-    """
-    Parse @filename references from user input.
-    Returns a list of file paths and the cleaned message.
-
-    Examples:
-        "@file.py what does this do?" -> (["file.py"], "what does this do?")
-        "compare @a.py and @b.py" -> (["a.py", "b.py"], "compare and")
-    """
     if not user_input:
         return [], ""
     import re
 
-    # Pattern to match @filename (supports various file extensions and paths)
     pattern = r"@([\w\-./]+(?:\.\w+)?)"
 
-    # Find all file references
     file_refs = re.findall(pattern, user_input)
 
-    # Remove @ references from the message
     cleaned_message = re.sub(pattern, "", user_input).strip()
-    # Clean up extra spaces
+
     cleaned_message = re.sub(r"\s+", " ", cleaned_message)
 
     return file_refs, cleaned_message
 
 
 def load_file_content(file_path):
-    """
-    Load the content of a file.
-    Raises FileNotFoundError if file doesn't exist.
-    """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             file_content = f.read()
@@ -46,9 +31,6 @@ def load_file_content(file_path):
 
 
 def format_file_context(file_path: str, content: str) -> str:
-    """
-    Format file content for injection into the message context.
-    """
     return f"""
 
 <file path="{file_path}">
@@ -57,13 +39,6 @@ def format_file_context(file_path: str, content: str) -> str:
 
 
 def process_file_references(user_input: str, cwd: str | None = None):
-    """
-    Process user input with @file references.
-    Returns enriched message with file contents and list of loaded files.
-
-    Returns:
-        tuple: (enriched_message, loaded_files, errors)
-    """
     file_refs, cleaned_message = parse_file_references(user_input)
 
     if not file_refs:
@@ -84,7 +59,6 @@ def process_file_references(user_input: str, cwd: str | None = None):
         except Exception as e:
             errors.append(str(e))
 
-    # Construct the enriched message
     if file_contexts:
         enriched_message = f"{cleaned_message}\n\n{''.join(file_contexts)}"
     else:
@@ -116,13 +90,11 @@ def summarize_messages(
 
 
 def discover_skills(cwd: str | None = None) -> list[dict]:
-    """Discover skills from local .skills/ and terminus-cli/.skills/."""
     import yaml
 
     if cwd is None:
         cwd = os.getcwd()
 
-    # Determine kodex-cli root (parent of src/)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     kodex_cli_root = os.path.dirname(script_dir)
 

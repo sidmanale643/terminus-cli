@@ -12,10 +12,6 @@ MAX_TIMEOUT_SECONDS = 120
 
 
 class Bash(ToolSchema):
-    """
-    Tool for executing bash commands and returning the output.
-    """
-
     def __init__(self):
         self.name = "bash"
 

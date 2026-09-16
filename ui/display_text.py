@@ -1,9 +1,3 @@
-"""Human-readable display formatting for Terminus UI surfaces.
-
-Raw JSON is never suitable for the transcript or Mission Control. These helpers
-turn tool args/outputs (and any accidental JSON payloads) into plain text.
-"""
-
 from __future__ import annotations
 
 import json
@@ -11,7 +5,7 @@ import re
 import textwrap
 from typing import Any
 
-# Soft caps so a single event cannot flood the UI, while still showing useful body.
+
 ONE_LINE_DEFAULT = 160
 ACTIVITY_LINE_MAX = 280
 DETAIL_LINE_MAX = 4000
@@ -24,7 +18,6 @@ def collapse_ws(value: str) -> str:
 
 
 def one_line(value: str, max_length: int = ONE_LINE_DEFAULT) -> str:
-    """Collapse to a single line and optionally ellipsize."""
     single = collapse_ws(value)
     if max_length <= 0 or len(single) <= max_length:
         return single
@@ -34,7 +27,6 @@ def one_line(value: str, max_length: int = ONE_LINE_DEFAULT) -> str:
 
 
 def wrap_lines(value: str, width: int) -> list[str]:
-    """Wrap text for inspector panes without truncating mid-content."""
     width = max(12, width)
     lines: list[str] = []
     for paragraph in (value or "").splitlines() or [""]:
@@ -66,7 +58,6 @@ def _format_scalar(value: Any) -> str:
 def format_data(
     value: Any, *, indent: int = 0, max_lines: int = MAX_STRUCTURED_LINES
 ) -> list[str]:
-    """Render structured data as plain key/value lines (no braces/brackets)."""
     prefix = "  " * indent
     lines: list[str] = []
 
@@ -125,7 +116,6 @@ def try_parse_json(text: str) -> Any | None:
 
 
 def humanize_text(value: str, *, max_chars: int = DETAIL_LINE_MAX) -> str:
-    """Return display-safe text; convert whole-string JSON to plain lines."""
     text = (value or "").strip()
     if not text:
         return ""
@@ -145,7 +135,6 @@ def humanize_output_lines(
     max_lines: int = TOOL_OUTPUT_LINES,
     max_chars: int = DETAIL_LINE_MAX,
 ) -> list[str]:
-    """Split tool output into human-readable lines for feed/inspector storage."""
     text = humanize_text(value, max_chars=max_chars)
     if not text:
         return []
@@ -176,7 +165,6 @@ def _path_list(args: dict[str, Any], *keys: str) -> list[str]:
 def tool_call_label(
     tool_name: str, args: dict[str, Any] | None, fallback: str = ""
 ) -> str:
-    """Short human label for a tool invocation (never JSON)."""
     args = args or {}
     name = (tool_name or "tool").strip() or "tool"
 
@@ -263,10 +251,6 @@ def tool_call_label(
 
 
 def tool_arg_detail_lines(tool_name: str, args: dict[str, Any] | None) -> list[str]:
-    """Secondary human details for a tool call — never a raw JSON blob.
-
-    Used when the short label alone is not enough (e.g. multi-file reads).
-    """
     args = args or {}
     name = (tool_name or "").strip()
     lines: list[str] = []
@@ -281,7 +265,6 @@ def tool_arg_detail_lines(tool_name: str, args: dict[str, Any] | None) -> list[s
         return lines
 
     if name == "bash":
-        # Command already lives in the label; only surface timeout when non-default.
         timeout = args.get("timeout")
         if timeout not in (None, "", 30):
             lines.append(f"timeout  {timeout}s")
@@ -293,7 +276,6 @@ def tool_arg_detail_lines(tool_name: str, args: dict[str, Any] | None) -> list[s
             lines.append(f"edits  {len(old_strings)}")
         return lines
 
-    # Generic fallback: skip bulky/nested fields; never dump whole args as JSON.
     skip = {
         "content",
         "old_string",

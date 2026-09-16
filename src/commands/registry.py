@@ -38,17 +38,14 @@ class CommandRegistry:
 
     @classmethod
     def resolve(cls, name: str) -> Command | None:
-        """Resolve a command token, including aliases, to its primary command."""
         return cls._commands.get(name.strip().lower())
 
     @classmethod
     def command_token(cls, text: str) -> str:
-        """Return the normalized first token from a command/query string."""
         return text.strip().split(maxsplit=1)[0].lower() if text.strip() else ""
 
     @classmethod
     def is_command(cls, text: str) -> bool:
-        """Whether input should be routed through the command dispatcher."""
         token = cls.command_token(text)
         return bool(token) and (token.startswith("/") or cls.resolve(token) is not None)
 
@@ -66,7 +63,6 @@ class CommandRegistry:
 
     @classmethod
     def command_names(cls) -> list[str]:
-        """Return only primary command names (no aliases)."""
         return [command.name for command in cls.all()]
 
 

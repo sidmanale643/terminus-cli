@@ -29,19 +29,11 @@ class ContextManager:
         return message
 
     def replace_messages(self, messages: List[Dict[str, Any]]) -> None:
-        """Replace the context in one pass, for restores and other bulk operations."""
         self.context = [dict(message) for message in messages]
         self.update_context_size()
 
     @staticmethod
     def _estimate_message_tokens(message: Dict[str, Any]) -> int:
-        """Estimate the tokens sent for one complete API message.
-
-        The project does not carry a tokenizer for every supported provider, so
-        use one consistent character-based approximation. Serializing the whole
-        message also accounts for tool-call metadata and arguments rather than
-        counting only ``content``.
-        """
         try:
             serialized = json.dumps(message, ensure_ascii=False, default=str)
         except (TypeError, ValueError):

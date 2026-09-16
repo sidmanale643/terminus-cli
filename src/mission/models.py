@@ -1,5 +1,3 @@
-"""Typed state and event contracts for Mission Control."""
-
 from __future__ import annotations
 
 import json

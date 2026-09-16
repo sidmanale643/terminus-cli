@@ -57,15 +57,6 @@ class AskQuestion(ToolSchema):
         }
 
     def run(self, questions: list[dict[str, Any]]) -> str:
-        """
-        Format and return clarifying questions for the user.
-
-        Args:
-            questions: A list of structured questions to present to the user.
-
-        Returns:
-            A formatted string containing the questions.
-        """
         if not isinstance(questions, list):
             return "Error: questions must be a list."
         if not questions:

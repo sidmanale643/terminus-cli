@@ -6,8 +6,6 @@ from src.constants import DEFAULT_DATABASE_DIR
 
 
 class SessionHistory:
-    """Keep the active transcript in memory and persist user preferences."""
-
     def __init__(self):
         os.makedirs(DEFAULT_DATABASE_DIR, exist_ok=True)
 
@@ -35,7 +33,6 @@ class SessionHistory:
         return json.dumps(message, ensure_ascii=False, default=str)
 
     def insert_to_session_history(self, role, content):
-        """Append one active-session row without a second SQLite database."""
         if not isinstance(content, str):
             content = self._encode_message(content)
 
@@ -49,7 +46,6 @@ class SessionHistory:
         return row["id"]
 
     def record_message(self, message: dict):
-        """Record an API message using one canonical JSON serialization."""
         if not isinstance(message, dict):
             raise TypeError("session messages must be dictionaries")
         if "role" not in message:

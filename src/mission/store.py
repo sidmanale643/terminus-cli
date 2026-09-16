@@ -1,5 +1,3 @@
-"""SQLite persistence for mission audit and replay."""
-
 from __future__ import annotations
 
 import json

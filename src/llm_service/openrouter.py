@@ -94,9 +94,6 @@ class OpenRouterProvider:
         temperature: float = 0.3,
         response_format: Optional[Dict] = None,
     ) -> Response:
-        """
-        Makes a request to OpenRouter API with optional reasoning capabilities.
-        """
         try:
             client = self._client()
             request_params = self._build_request_params(
@@ -123,9 +120,6 @@ class OpenRouterProvider:
         temperature: float = 0.3,
         response_format: Optional[Dict] = None,
     ) -> Iterator[Response]:
-        """
-        Stream a response from OpenRouter.
-        """
         try:
             client = self._client()
             request_params = self._build_request_params(
@@ -150,7 +144,6 @@ class OpenRouterProvider:
                 usage = getattr(chunk, "usage", None)
 
                 if content or tool_calls or reasoning_text or usage:
-                    # Extract usage from chunk if available (usually in the last chunk)
                     prompt_tokens = None
                     response_tokens = None
                     reasoning_tokens = 0
@@ -161,7 +154,6 @@ class OpenRouterProvider:
                         response_tokens = getattr(usage, "completion_tokens", None)
                         cost = getattr(usage, "cost", None)
 
-                        # Extract reasoning tokens if available
                         completion_details = getattr(
                             usage, "completion_tokens_details", None
                         )
@@ -170,7 +162,6 @@ class OpenRouterProvider:
                                 completion_details, "reasoning_tokens", 0
                             )
 
-                        # Print usage summary when available (final chunk)
                         if prompt_tokens is not None:
                             total_tokens = getattr(usage, "total_tokens", 0)
                             print(

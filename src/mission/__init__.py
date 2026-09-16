@@ -1,5 +1,3 @@
-"""Durable Mission Control runtime."""
-
 from .controller import MissionController, MissionOutcome
 from .models import (
     MissionEvent,

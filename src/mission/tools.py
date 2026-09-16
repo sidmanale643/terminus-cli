@@ -1,5 +1,3 @@
-"""Capability-limited tools used by mission agents."""
-
 from __future__ import annotations
 
 import shlex
@@ -22,7 +20,6 @@ class MissionAskQuestion(AskQuestion):
 
 
 def normalize_scope(cwd: str, scope: list[str]) -> list[Path]:
-    """Resolve a declared scope and reject paths outside the repository root."""
     root = Path(cwd).expanduser().resolve()
     normalized: list[Path] = []
     for raw in scope:

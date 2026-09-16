@@ -1,5 +1,3 @@
-"""Structured dispatch tool exposed only to a mission orchestrator."""
-
 from __future__ import annotations
 
 import json

@@ -68,13 +68,6 @@ _CATASTROPHIC = (
 
 
 class CommandPermissionManager:
-    """Classify commands for automatic execution, approval, or rejection.
-
-    This is deliberately conservative and is not a shell parser. Only simple,
-    known read-only argv forms run automatically. Bash syntax and everything
-    else go through the user's approval callback.
-    """
-
     def classify(self, command: str) -> PermissionResult:
         text = command.strip()
         if not text:

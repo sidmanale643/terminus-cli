@@ -16,7 +16,6 @@ from src.mission import MissionController, MissionStore
 
 
 def create_display(stop_event):
-    """Create the Rich terminal UI."""
     from rich_ui import RichDisplay
 
     return RichDisplay(stop_event=stop_event)
@@ -35,13 +34,12 @@ class TerminusCLI:
         self._active_mission: MissionController | None = None
         self.sigint_pending_exit = False
         self.last_sigint_time = 0.0
-        self.sigint_grace_window = 2.0  # seconds to treat double Ctrl+C as exit
+        self.sigint_grace_window = 2.0
         self._last_response: str | None = None
         self._shutting_down = False
         signal.signal(signal.SIGINT, self._handle_sigint)
 
     def _mark_interrupt(self) -> bool:
-        """Track whether this interrupt should exit the app."""
         now = time.monotonic()
         self.sigint_pending_exit = (
             now - self.last_sigint_time
@@ -52,13 +50,12 @@ class TerminusCLI:
     def _handle_sigint(self, signum, frame):
         if self._shutting_down:
             return
-        # First Ctrl+C cancels current turn; a second within the grace window exits
+
         self.stop_event.set()
         self._mark_interrupt()
         raise KeyboardInterrupt()
 
     def begin_shutdown(self):
-        """Prevent late SIGINTs from interrupting interpreter teardown."""
         if self._shutting_down:
             return
         self._shutting_down = True
@@ -76,7 +73,6 @@ class TerminusCLI:
         raise SystemExit(0)
 
     def _emit_worker_event(self, event_type: str, data: dict):
-        """Forward subagent lifecycle events to the display."""
         method_name = f"send_{event_type}"
         method = getattr(self.display, method_name, None)
         if method is None:
@@ -112,18 +108,15 @@ class TerminusCLI:
         self.display.handle_mission_event(event)
 
     def process_query(self, user_input: str):
-        """Process user query and coordinate with agent and display"""
         try:
             self.stop_event.clear()
-            # Process @ file references
+
             enriched_message, loaded_files, errors = process_file_references(user_input)
 
-            # Display loaded files
             if loaded_files:
                 files_list = ", ".join([f"[red]{f}[/red]" for f in loaded_files])
                 self.display.print_message(f"[dim red]Loaded files: {files_list}")
 
-            # Display errors if any
             if errors:
                 for error in errors:
                     self.display.print_message(
@@ -147,13 +140,11 @@ class TerminusCLI:
                     permission_callback=self.display.request_command_permission,
                 )
 
-            # Render final response after live display stops to keep content visible
             handler.render_final_response(response)
             self._last_response = response
             self.sigint_pending_exit = False
             self.display.clear_pending_exit()
 
-            # Display footer with context info
             self.display.render_footer(
                 cwd=os.getcwd(),
                 model=self.agent.model,
@@ -172,7 +163,6 @@ class TerminusCLI:
             self.display.render_error(str(e))
 
     def execute_command(self, command: str) -> bool:
-        """Execute a slash command. Returns True if should continue loop, False if should exit"""
         command = command.strip()
         parts = command.split(maxsplit=1)
         token = parts[0].lower() if parts else ""
@@ -180,31 +170,26 @@ class TerminusCLI:
         command_name = command_spec.name if command_spec else None
         argument = parts[1] if len(parts) > 1 else ""
 
-        # Exit commands
         if command_name == "/exit" and not argument:
             self.display.print_centered(
                 "Shutting down TERMINUS...", style=f"bold {COLORS['text']}"
             )
             return False
 
-        # Reset session
         if command_name == "/reset" and not argument:
             self.agent.clear_session()
             self.display.render_success_message("Session reset successfully")
             return True
 
-        # Clear screen
         if command_name == "/clear" and not argument:
             self.display.clear_screen()
             self.display.render_banner()
             return True
 
-        # Display context size
         if command_name == "/context_size" and not argument:
             self.display.print_message(f"Context Size: {self.agent.context_size}")
             return True
 
-        # Compact conversation context
         if command_name == "/compact" and not argument:
             result = self.agent.context_manager.compact()
             if result is None:
@@ -221,17 +206,14 @@ class TerminusCLI:
                     )
             return True
 
-        # Display history
         if command_name == "/history" and not argument:
             self._display_history()
             return True
 
-            # Display help
         if command_name == "/help" and not argument:
             self.display.render_help()
             return True
 
-        # Durable Mission Control runtime and audit commands.
         if command_name == "/mission":
             task = argument.strip()
             if not task:
@@ -262,7 +244,6 @@ class TerminusCLI:
             self.display.print_newline()
             return True
 
-        # Copy last response to clipboard
         if command_name == "/copy" and not argument:
             if self._last_response:
                 if copy_to_clipboard(self._last_response):
@@ -292,7 +273,6 @@ class TerminusCLI:
             handler.render_final_response(result)
             return True
 
-            # Display context
         if command_name == "/context" and not argument:
             self.display.print_message(str(self.agent.context))
             return True
@@ -308,7 +288,6 @@ class TerminusCLI:
                 self.display.print_message("[dim]Model selection cancelled.[/dim]")
             return True
 
-        # Connect provider and configure API key
         if command_name == "/connect" and not argument:
             try:
                 result = self.display.connect_provider_ui()
@@ -320,7 +299,6 @@ class TerminusCLI:
 
                 provider_name, api_key = result
 
-                # Determine the env var name for this provider
                 env_var_map = {
                     "openrouter": "OPEN_ROUTER_API_KEY",
                 }
@@ -329,13 +307,12 @@ class TerminusCLI:
                     self.display.render_error(f"Unknown provider: {provider_name}")
                     return True
 
-                # Save to user-level .env
                 env_dir = os.path.expanduser("~/.terminus")
                 os.makedirs(env_dir, exist_ok=True)
                 env_path = os.path.join(env_dir, ".env")
                 set_key(env_path, env_var, api_key)
                 os.environ[env_var] = api_key
-                # Update the provider's API key in-memory
+
                 self.agent.llm_service.set_api_key(api_key)
                 self.display.render_success_message(
                     f"API key configured for {provider_name}. "
@@ -347,14 +324,12 @@ class TerminusCLI:
                 self.display.render_error(str(e))
             return True
 
-        # List available skills
         if command_name == "/skills" and not argument:
             skills = discover_skills(os.getcwd())
             skills = self.agent.annotate_skills(skills)
             self.display.render_skills(skills)
             return True
 
-        # Load a skill by name
         if command_name == "/skill":
             skills = discover_skills(os.getcwd())
             skills = self.agent.annotate_skills(skills)
@@ -380,7 +355,6 @@ class TerminusCLI:
                     )
             return True
 
-        # Unknown slash commands are explicit errors.
         if token.startswith("/"):
             self.display.render_error(f"Unknown command: {command}")
             return True
@@ -388,7 +362,6 @@ class TerminusCLI:
         return True
 
     def _display_history(self):
-        """Display session history"""
         history = self.agent.get_session_history(limit=5)
 
         if not history:
@@ -508,7 +481,6 @@ class TerminusCLI:
         )
 
     def _load_skill(self, skill: dict):
-        """Load a skill's content into the current conversation context."""
         skill_name = skill.get("name", "unknown")
         loaded = self.agent.load_skill(skill)
         if not loaded:
@@ -519,7 +491,6 @@ class TerminusCLI:
         self.display.render_success_message(f"Skill '{skill_name}' loaded into context")
 
     def run_interactive(self):
-        """Run interactive mode with conversation loop"""
         self.display.start_interactive()
         self.display.render_banner()
         while True:
@@ -534,12 +505,9 @@ class TerminusCLI:
 
                 user_input = sanitize_terminal_input(user_input)
 
-                # Handle empty input
                 if not user_input.strip():
                     continue
 
-                # ask_question already paints the selection into the transcript;
-                # don't re-render the auto-queued answer as another "You" block.
                 silent = self.display.consume_last_input_was_silent()
                 if not silent:
                     self.display.render_user_message(user_input)
@@ -560,7 +528,6 @@ class TerminusCLI:
                     self.display.print_newline()
                     continue
 
-                # Process as query
                 self.display.generation_start()
                 try:
                     self.process_query(user_input)
@@ -571,7 +538,7 @@ class TerminusCLI:
             except KeyboardInterrupt:
                 if self.sigint_pending_exit or self.display.check_pending_exit():
                     self._exit_app()
-                # Single interrupt: cancel turn, keep session
+
                 self.stop_event.clear()
                 self.display.clear_pending_exit()
                 self.sigint_pending_exit = False
@@ -580,7 +547,6 @@ class TerminusCLI:
                 break
 
     def run_single_query(self, query: str):
-        """Run a single query (useful for non-interactive mode)"""
         self.display.render_banner()
         if CommandRegistry.is_command(query):
             self.execute_command(query)
@@ -589,7 +555,6 @@ class TerminusCLI:
 
 
 def main():
-    """Main entry point for 'terminus' command"""
     parser = argparse.ArgumentParser(
         prog="terminus",
         description="AI-powered development companion for the command line",
@@ -599,7 +564,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Always use the current working directory where the command is invoked
     invoked_dir = os.getcwd()
     cli = TerminusCLI(cwd=invoked_dir)
 

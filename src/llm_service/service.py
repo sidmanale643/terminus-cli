@@ -5,8 +5,6 @@ from src.llm_service.openrouter import OpenRouterProvider
 
 
 class LLMService:
-    """Synchronous LLM facade for the application's OpenRouter provider."""
-
     def __init__(self):
         self.provider = OpenRouterProvider()
         self.active_provider_name = DEFAULT_PROVIDER

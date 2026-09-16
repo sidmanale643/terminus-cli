@@ -1,5 +1,6 @@
 from textwrap import dedent
 
+
 def get_init_prompt():
     return dedent("""
     You are generating or updating an AGENTS.md file for the project in the current working directory.
@@ -87,5 +88,3 @@ def get_init_prompt():
 
     REMINDER: Output ONLY the raw markdown. No explanations before or after.
     """)
-
-    

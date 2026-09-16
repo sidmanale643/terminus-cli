@@ -10,11 +10,10 @@ VALID_STATUSES = {"pending", "in_progress", "completed"}
 
 
 class TodoStorageError(RuntimeError):
-    """Raised when the persisted todo list cannot be read or written."""
+    pass
 
 
 def _load_todos() -> List[dict]:
-    """Load todo items from the todos file."""
     if not os.path.exists(TODO_FILE):
         return []
     try:
@@ -37,7 +36,6 @@ def _load_todos() -> List[dict]:
 
 
 def _save_todos(items: List[dict]) -> None:
-    """Save todo items to the todos file."""
     try:
         os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
         with open(TODO_FILE, "w", encoding="utf-8") as f:

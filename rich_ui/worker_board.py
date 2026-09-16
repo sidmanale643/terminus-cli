@@ -1,5 +1,3 @@
-"""Compact Mission Control board rendered with rich.live.Live."""
-
 from __future__ import annotations
 
 import sys
@@ -34,9 +32,6 @@ from ui.display_text import (
 )
 from ui.theme import COLORS
 
-# --------------------------------------------------------------------------- #
-# Constants
-# --------------------------------------------------------------------------- #
 
 ACTIVITY_MAX_LINES = 80
 WORKER_DETAIL_LINES = 400
@@ -44,7 +39,7 @@ STREAM_MAX_CHARS = 8000
 THINKING_MAX_CHARS = 400
 REFRESH_INTERVAL_SECONDS = 0.1
 GOAL_MAX_CHARS = 160
-# Overview cards stay compact; inspector stores/shows much more.
+
 DETAIL_PREVIEW = 220
 INSPECTOR_DETAIL_MAX = DETAIL_LINE_MAX
 
@@ -127,13 +122,7 @@ ROLE_LABELS = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
-
 def _compact(value: str, max_length: int) -> str:
-    """Single-line ellipsize for overview chrome (cards, feed previews)."""
     return one_line(
         humanize_text(value or "", max_chars=max(max_length * 4, 400)), max_length
     )
@@ -181,11 +170,6 @@ def _is_terminal_status(status: str) -> bool:
     )
 
 
-# --------------------------------------------------------------------------- #
-# State
-# --------------------------------------------------------------------------- #
-
-
 @dataclass
 class WorkerState:
     worker_id: str
@@ -213,14 +197,7 @@ class WorkerState:
         return max(0.0, end - self.started_at)
 
 
-# --------------------------------------------------------------------------- #
-# Board
-# --------------------------------------------------------------------------- #
-
-
 class MissionBoard:
-    """Live full-screen theater for Mission Control."""
-
     def __init__(
         self, console, title: str, goal: str, phase: str, mission_id: str | None = None
     ):
@@ -238,9 +215,7 @@ class MissionBoard:
         self.stream = ""
         self.thinking = ""
         self.activity_expanded = False
-        # Rows of older feed/inspector content held above the live edge.
-        # Without capturing wheel events the terminal scrolls the primary
-        # buffer underneath Live's alternate screen ("back to homepage").
+
         self._scroll_offset = 0
         self._last_refresh = 0.0
         self._finished = False
@@ -253,10 +228,6 @@ class MissionBoard:
             screen=console.is_terminal,
             auto_refresh=False,
         )
-
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-    # ------------------------------------------------------------------ #
 
     def is_live(self) -> bool:
         return self._live.is_started
@@ -349,7 +320,6 @@ class MissionBoard:
             body_parts.append(Text(""))
             body_parts.append(Text(self.goal, style=COLORS["dim"]))
 
-        # Compact worker recap
         if self.workers:
             body_parts.append(Text(""))
             for worker in self.workers.values():
@@ -384,7 +354,6 @@ class MissionBoard:
         self._refresh(force=True)
 
     def pause(self):
-        """Suspend the live display so a prompt can take over the terminal."""
         if not self._finished:
             self._paused = True
             self._stop_input_listener()
@@ -403,7 +372,6 @@ class MissionBoard:
             self._start_input_listener()
 
     def handle_key(self, key: str) -> bool:
-        """Open and navigate worker inspectors using single-key controls."""
         workers = list(self.workers.values())
         if not workers:
             return False
@@ -438,12 +406,6 @@ class MissionBoard:
         return True
 
     def handle_scroll(self, delta: int) -> bool:
-        """Scroll the activity feed or open inspector; swallow terminal wheel events.
-
-        Positive delta scrolls into older content; negative returns toward the
-        live edge. Capturing the wheel is required so the terminal does not
-        scroll Live's alternate screen away and reveal the homepage.
-        """
         if not delta:
             return False
         self._scroll_offset = max(0, self._scroll_offset + delta)
@@ -486,13 +448,6 @@ class MissionBoard:
         self._input_thread = None
 
     def _input_loop(self) -> None:
-        """Keyboard + mouse listener for Mission Control navigation.
-
-        Enables SGR mouse reporting so trackpad/wheel events arrive as CSI
-        sequences we can consume. Without this, the terminal scrolls the
-        primary buffer under Live's alternate screen and the UI appears to
-        jump back to the Terminus homepage.
-        """
         import os
         import select
         import termios
@@ -526,7 +481,6 @@ class MissionBoard:
             return bytes(collected)
 
         def consume_escape_sequence() -> bytes:
-            """Read a full CSI/SS3/OSC sequence (same contract as read_terminal_line)."""
             sequence = bytearray()
             deadline = time.monotonic() + 0.05
             while len(sequence) < 128:
@@ -544,7 +498,6 @@ class MissionBoard:
                 last = sequence[-1]
                 if first == ord("["):
                     if len(sequence) == 1:
-                        # Longer window for SGR mouse frames (``[<btn;x;yM``).
                         deadline = time.monotonic() + 0.12
                     if len(sequence) > 1 and 0x40 <= last <= 0x7E:
                         return bytes(sequence)
@@ -569,12 +522,12 @@ class MissionBoard:
                     return
                 if raw == b"\x1b":
                     sequence = consume_escape_sequence()
-                    # Legacy X10 mouse: ESC [ M Cb Cx Cy
+
                     if sequence == b"[M":
                         payload = read_bytes(3, timeout=0.12)
                         self.handle_scroll(legacy_mouse_scroll_delta(payload))
                         continue
-                    # Arrow keys navigate workers; page up/down + wheel scroll.
+
                     arrows = {
                         b"[A": "k",
                         b"OA": "k",
@@ -592,7 +545,7 @@ class MissionBoard:
                     if delta:
                         self.handle_scroll(delta)
                         continue
-                    # Bare Esc closes the inspector; other CSI (clicks) is swallowed.
+
                     if not sequence:
                         self.handle_key("\x1b")
                     continue
@@ -600,7 +553,7 @@ class MissionBoard:
                     key = raw.decode(sys.stdin.encoding or "utf-8")
                 except UnicodeDecodeError:
                     continue
-                # Drop leftover printable fragments from partial mouse frames.
+
                 if key in "Mm<>;":
                     continue
                 self.handle_key(key)
@@ -614,10 +567,6 @@ class MissionBoard:
                 termios.tcsetattr(input_fd, termios.TCSADRAIN, original)
             except termios.error:
                 pass
-
-    # ------------------------------------------------------------------ #
-    # Rendering
-    # ------------------------------------------------------------------ #
 
     def _refresh(self, force: bool = False):
         if not self._live.is_started:
@@ -802,7 +751,7 @@ class MissionBoard:
             self._worker_card(worker, col_width, index + 1)
             for index, worker in enumerate(workers)
         ]
-        # Pad to full rows
+
         while len(cells) % columns:
             cells.append(Text(""))
         for start in range(0, len(cells), columns):
@@ -817,7 +766,6 @@ class MissionBoard:
         role_style = _role_style(role)
         status_style = _status_style(status)
 
-        # Header: mark ROLE description ........ status elapsed
         header = Text()
         if index is not None:
             header.append(f"[{index}] ", style=f"bold {COLORS['accent_soft']}")
@@ -845,7 +793,6 @@ class MissionBoard:
 
         lines: list[RenderableType] = [header]
 
-        # Activity / result body
         if worker.details:
             for detail in list(worker.details)[-3:]:
                 lines.append(self._format_detail_line(detail, width))
@@ -860,7 +807,6 @@ class MissionBoard:
             wait.append("queued", style=COLORS["muted"])
             lines.append(wait)
 
-        # Result summary when finished
         if _is_terminal_status(status) and (worker.summary or worker.result):
             result_text = worker.summary or worker.result
             result_line = Text()
@@ -958,7 +904,7 @@ class MissionBoard:
 
         inspector_height = max(6, height - 8)
         reserved = 8 + len(evidence_lines)
-        # Budget rows for activity; wrap each event so long tool output is readable.
+
         row_budget = max(6, inspector_height - reserved)
         wrap_width = max(24, width - 8)
         rendered_rows: list[RenderableType] = []
@@ -966,7 +912,7 @@ class MissionBoard:
             rendered_rows.extend(
                 self._format_inspector_detail_block(detail, wrap_width)
             )
-        # Cap extreme histories while keeping the most recent activity.
+
         max_inspector_rows = max(row_budget * 20, 400)
         if len(rendered_rows) > max_inspector_rows:
             rendered_rows = rendered_rows[-max_inspector_rows:]
@@ -1024,7 +970,6 @@ class MissionBoard:
     def _format_inspector_detail_block(
         self, detail: str, width: int
     ) -> list[RenderableType]:
-        """Multi-line wrap for one stored event (no mid-line hard truncate)."""
         raw = humanize_text((detail or "").strip(), max_chars=INSPECTOR_DETAIL_MAX)
         if not raw:
             return []
@@ -1094,7 +1039,6 @@ class MissionBoard:
             activity_lines.append(thinking_text)
 
         if self.stream:
-            # Show trailing lines of stream so latest content is visible
             stream_clean = self.stream.strip()
             if stream_clean:
                 for stream_line in stream_clean.splitlines()[-6:]:
@@ -1126,7 +1070,7 @@ class MissionBoard:
         feed_height = max(4, height - chrome_rows - 1)
         if not self.activity_expanded:
             feed_height = min(feed_height, max(3, len(activity_lines) + 2))
-        # Visible window ending `scroll_offset` rows above the live edge.
+
         visible_count = max(1, feed_height - 2) if feed_height > 2 else 1
         max_offset = max(0, len(activity_lines) - visible_count)
         self._scroll_offset = min(max(0, self._scroll_offset), max_offset)
@@ -1165,10 +1109,6 @@ class MissionBoard:
         footer.append(" quit", style=COLORS["muted"])
         return footer
 
-    # ------------------------------------------------------------------ #
-    # Display events
-    # ------------------------------------------------------------------ #
-
     def log(self, text: str, style: str = COLORS["muted"]):
         cleaned = one_line(humanize_text(text or ""), ACTIVITY_LINE_MAX)
         if not cleaned:
@@ -1182,10 +1122,9 @@ class MissionBoard:
         self._refresh()
 
     def stream_finish(self, content: str):
-        """Finalize the current stream without appending its full text twice."""
         self.thinking = ""
         self.stream = (content or "")[-STREAM_MAX_CHARS:]
-        # Promote final stream into activity as a single entry for history
+
         preview = _compact(
             self.stream.strip().splitlines()[-1] if self.stream.strip() else "", 160
         )
@@ -1195,7 +1134,6 @@ class MissionBoard:
         self._refresh(force=True)
 
     def thinking_update(self, content: str):
-        """Replace the in-progress reasoning line instead of logging each delta."""
         single_line = " ".join((content or "").split())
         if len(single_line) > THINKING_MAX_CHARS:
             single_line = f"…{single_line[-(THINKING_MAX_CHARS - 1) :]}"
@@ -1222,7 +1160,7 @@ class MissionBoard:
         )
         if not lines:
             return
-        # Activity feed: first line plus a short continuation hint.
+
         self.log(f"  ↳ {one_line(lines[0], ACTIVITY_LINE_MAX)}", style=COLORS["subtle"])
         if len(lines) > 1:
             self.log(
@@ -1357,11 +1295,6 @@ class MissionBoard:
         return worker
 
 
-# --------------------------------------------------------------------------- #
-# Layout helpers
-# --------------------------------------------------------------------------- #
-
-
 def _phase_style(phase: str) -> str:
     styles = {
         "brief": COLORS["dim"],
@@ -1382,7 +1315,6 @@ def _split_line(left: Text, right: Text, width: int) -> Text:
     left_copy = left.copy()
     right_copy = right.copy()
     if left_copy.cell_len + right_copy.cell_len > available:
-        # Prefer shrinking left
         room_for_left = max(0, available - right_copy.cell_len)
         left_copy.truncate(room_for_left, overflow="ellipsis")
     gap = max(0, available - left_copy.cell_len - right_copy.cell_len)
