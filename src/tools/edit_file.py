@@ -14,7 +14,7 @@ class FileEditor(ToolSchema):
 
         Usage:
         - Read the file with file_reader before editing so old_string can be copied exactly.
-        - Use file_path for the path. Relative paths are resolved from the current working directory. path is accepted as a compatibility alias.
+        - Use file_path for the path. Relative paths are resolved from the current working directory.
         - Use old_string/new_string for a single edit or old_strings/new_strings for multiple edits in one atomic operation.
         - When editing text from file_reader output, preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
         - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
@@ -35,10 +35,6 @@ class FileEditor(ToolSchema):
                         "file_path": {
                             "type": "string",
                             "description": "the path of the file to edit",
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "compatibility alias for file_path",
                         },
                         "old_string": {
                             "type": "string",
@@ -91,71 +87,25 @@ class FileEditor(ToolSchema):
         old_strings: list[str] = None,
         new_strings: list[str] = None,
         replace_all: bool = False,
-        path: str = None,
     ):
-        try:
-            file_path = file_path or path
-            if not file_path:
-                return "Error: file_path is required"
-            if old_strings is not None or new_strings is not None:
-                return self._run_multiple(file_path, old_strings, new_strings)
+        if not file_path:
+            return "Error: file_path is required"
+
+        multiple = old_strings is not None or new_strings is not None
+        if multiple:
+            if old_strings is None or new_strings is None:
+                return "Error: old_strings and new_strings are required."
+            if old_string is not None or new_string is not None:
+                return "Error: use either single or multiple edit arguments, not both."
+            if replace_all:
+                return "Error: replace_all is only supported for a single edit."
+            if len(old_strings) != len(new_strings):
+                return "Error: old_strings and new_strings must have the same length."
+            edits = list(zip(old_strings, new_strings))
+        else:
             if old_string is None or new_string is None:
                 return "Error: old_string/new_string or old_strings/new_strings are required"
-            file_path = os.path.expanduser(file_path)
-            if not os.path.isabs(file_path):
-                file_path = os.path.abspath(file_path)
-            with open(file_path, "r", encoding="utf-8") as f:
-                original_content = f.read()
-
-            if old_string not in original_content:
-                return (
-                    f"Error: The string to replace was not found in {file_path}\n\n"
-                    "Make sure to read the file first and use the exact string "
-                    "(including whitespace and indentation) that you want to replace."
-                )
-
-            occurrence_count = original_content.count(old_string)
-
-            if occurrence_count > 1 and not replace_all:
-                return (
-                    f"Error: The string appears {occurrence_count} times in {file_path}. "
-                    "Either provide more context to make old_string unique, "
-                    "or set replace_all=true to replace all occurrences."
-                )
-
-            if replace_all:
-                new_content = original_content.replace(old_string, new_string)
-            else:
-                new_content = original_content.replace(old_string, new_string, 1)
-
-            if original_content == new_content:
-                return f"No changes made to {file_path} (old_string and new_string are identical)."
-
-            diff = self._make_diff(old_string, new_string, file_path)
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(new_content)
-
-            count = occurrence_count if replace_all else 1
-            return f"Edited {file_path} ({count} replacement{'s' if count > 1 else ''})\n\n{diff}"
-
-        except FileNotFoundError:
-            return f"Error: File not found: {file_path}"
-        except PermissionError:
-            return f"Error: Permission denied editing {file_path}"
-        except Exception as e:
-            return f"Error editing file: {e}"
-
-    def _run_multiple(
-        self,
-        file_path: str,
-        old_strings: list[str] = None,
-        new_strings: list[str] = None,
-    ):
-        if old_strings is None or new_strings is None:
-            return "Error: old_strings and new_strings are required."
-        if len(old_strings) != len(new_strings):
-            return "Error: old_strings and new_strings must have the same length."
+            edits = [(old_string, new_string)]
 
         file_path = os.path.expanduser(file_path)
         if not os.path.isabs(file_path):
@@ -163,38 +113,67 @@ class FileEditor(ToolSchema):
 
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+                original_content = f.read()
         except FileNotFoundError:
             return f"Error: File not found: {file_path}"
         except PermissionError:
             return f"Error: Permission denied reading {file_path}"
-
-        original = content
+        except OSError as exc:
+            return f"Error: Could not read {file_path}: {exc}"
         results = []
+        new_content = original_content
+        total_replacements = 0
 
-        for i, (old, new) in enumerate(zip(old_strings, new_strings)):
-            if old not in content:
-                results.append(f"  [{i + 1}] FAILED: old_string not found")
-                return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+        for index, (old, new) in enumerate(edits, start=1):
+            if not isinstance(old, str) or not isinstance(new, str):
+                message = "old and new edit values must be strings"
+                if multiple:
+                    results.append(f"  [{index}] FAILED: {message}")
+                    return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+                return f"Error: {message}"
 
-            count = content.count(old)
-            if count > 1:
-                results.append(
-                    f"  [{i + 1}] FAILED: old_string found {count} times (ambiguous)"
+            if old not in new_content:
+                if multiple:
+                    results.append(f"  [{index}] FAILED: old_string not found")
+                    return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+                return (
+                    f"Error: The string to replace was not found in {file_path}\n\n"
+                    "Make sure to read the file first and use the exact string "
+                    "(including whitespace and indentation) that you want to replace."
                 )
+
+            occurrence_count = new_content.count(old)
+            if occurrence_count > 1 and not replace_all:
+                if multiple:
+                    results.append(
+                        f"  [{index}] FAILED: old_string found {occurrence_count} times (ambiguous)"
+                    )
+                    return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+                return (
+                    f"Error: The string appears {occurrence_count} times in {file_path}. "
+                    "Either provide more context to make old_string unique, "
+                    "or set replace_all=true to replace all occurrences."
+                )
+
+            new_content = new_content.replace(old, new, -1 if replace_all else 1)
+            total_replacements += occurrence_count if replace_all else 1
+            if multiple:
+                results.append(f"  [{index}] OK")
+
+        if original_content == new_content:
+            if multiple:
                 return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+            return f"No changes made to {file_path} (old_string and new_string are identical)."
 
-            content = content.replace(old, new, 1)
-            results.append(f"  [{i + 1}] OK")
-
-        if content == original:
-            return f"Multi-edit aborted for {file_path}:\n" + "\n".join(results)
+        diff = self._make_diff(original_content, new_content, file_path)
 
         try:
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
+                f.write(new_content)
         except PermissionError:
             return f"Error: Permission denied writing {file_path}"
-
-        diff = self._make_diff(original, content, file_path)
-        return f"Multi-edited {file_path}:\n" + "\n".join(results) + f"\n\n{diff}"
+        except OSError as exc:
+            return f"Error: Could not write {file_path}: {exc}"
+        if multiple:
+            return f"Multi-edited {file_path}:\n" + "\n".join(results) + f"\n\n{diff}"
+        return f"Edited {file_path} ({total_replacements} replacement{'s' if total_replacements > 1 else ''})\n\n{diff}"
