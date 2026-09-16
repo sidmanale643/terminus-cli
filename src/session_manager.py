@@ -1,159 +1,79 @@
-import sqlite3
-import datetime
-import os
 import json
+import os
+import sqlite3
+
 from src.constants import DEFAULT_DATABASE_DIR
 
+
 class SessionHistory:
+    """Keep the active transcript in memory and persist user preferences."""
+
     def __init__(self):
-        if not os.path.exists(DEFAULT_DATABASE_DIR):
-            os.makedirs(DEFAULT_DATABASE_DIR)
-        
+        os.makedirs(DEFAULT_DATABASE_DIR, exist_ok=True)
+
         db_path = os.path.join(DEFAULT_DATABASE_DIR, "chat_history.db")
         self.con = sqlite3.connect(db_path)
         self.ch_cursor = self.con.cursor()
-        
-        self.session_history = sqlite3.connect(":memory:")
-        self.sh_cursor = self.session_history.cursor()
-        
+        self._session_rows: list[dict] = []
+        self._next_session_id = 1
+
         self._initialize_tables()
 
-    def _initialize_tables(self):
-        try:
-            self.ch_cursor.execute("""
-                CREATE TABLE IF NOT EXISTS chat_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    chat_history TEXT NOT NULL
-                )
-            """)
-            self.con.commit()
-            
-            self.sh_cursor.execute("""
-                CREATE TABLE IF NOT EXISTS session_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL
-                )
-            """)
-            self.session_history.commit()
-
-            self.ch_cursor.execute("""
-                CREATE TABLE IF NOT EXISTS preferences (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-            """)
-            self.con.commit()
-            
-        except sqlite3.OperationalError as e:
-            print(f"Error initializing tables: {e}")
+    def _initialize_tables(self) -> None:
+        self.ch_cursor.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            """
+        )
+        self.con.commit()
 
     @staticmethod
-    def _get_timestamp():
-        return datetime.datetime.now().isoformat()
-
-    def insert_to_chat_history(self, name, chat_history):
-        timestamp = self._get_timestamp()
-        chat_history_json = json.dumps(chat_history)
-        
-        self.ch_cursor.execute(
-            "INSERT INTO chat_history (name, timestamp, chat_history) VALUES (?, ?, ?)",
-            (name, timestamp, chat_history_json)
-        )
-        self.con.commit()
-        return self.ch_cursor.lastrowid
+    def _encode_message(message: dict) -> str:
+        return json.dumps(message, ensure_ascii=False, default=str)
 
     def insert_to_session_history(self, role, content):
-        timestamp = self._get_timestamp()
-        
-        self.sh_cursor.execute(
-            "INSERT INTO session_history (timestamp, role, content) VALUES (?, ?, ?)",
-            (timestamp, role, content)
-        )
-        self.session_history.commit()
-        return self.sh_cursor.lastrowid
+        """Append one active-session row without a second SQLite database."""
+        if not isinstance(content, str):
+            content = self._encode_message(content)
 
-    def insert_many_to_session_history(self, messages):
-        """Insert a sequence of (role, content) pairs in one transaction."""
-        rows = [(self._get_timestamp(), role, content) for role, content in messages]
-        if not rows:
-            return 0
-        self.sh_cursor.executemany(
-            "INSERT INTO session_history (timestamp, role, content) VALUES (?, ?, ?)",
-            rows,
-        )
-        self.session_history.commit()
-        return len(rows)
+        row = {
+            "id": self._next_session_id,
+            "role": role,
+            "content": content,
+        }
+        self._next_session_id += 1
+        self._session_rows.append(row)
+        return row["id"]
 
-    def retrieve_chat_history(self, name=None, chat_id=None, limit=None):
-        query = "SELECT id, name, timestamp, chat_history FROM chat_history"
-        params = []
-        
-        if chat_id:
-            query += " WHERE id = ?"
-            params.append(chat_id)
-        elif name:
-            query += " WHERE name = ?"
-            params.append(name)
-        
-        query += " ORDER BY timestamp DESC"
-        
-        if limit:
-            query += " LIMIT ?"
-            params.append(limit)
-        
-        self.ch_cursor.execute(query, params)
-        results = self.ch_cursor.fetchall()
-        
-        return [
-            {
-                "id": row[0],
-                "name": row[1],
-                "timestamp": row[2],
-                "chat_history": json.loads(row[3])
-            }
-            for row in results
-        ]
+    def record_message(self, message: dict):
+        """Record an API message using one canonical JSON serialization."""
+        if not isinstance(message, dict):
+            raise TypeError("session messages must be dictionaries")
+        if "role" not in message:
+            raise ValueError("session messages require a role")
+        return self.insert_to_session_history(
+            message["role"], self._encode_message(message)
+        )
 
     def retrieve_session_history(self, limit=None):
-        query = "SELECT id, timestamp, role, content FROM session_history ORDER BY id"
-        
-        if limit:
-            query += " DESC LIMIT ?"
-            self.sh_cursor.execute(query, (limit,))
-        else:
-            self.sh_cursor.execute(query)
-        
-        results = self.sh_cursor.fetchall()
-        
-        return [
-            {
-                "id": row[0],
-                "timestamp": row[1],
-                "role": row[2],
-                "content": row[3]
-            }
-            for row in results
-        ]
+        rows = self._session_rows
+        if limit is not None:
+            if limit <= 0:
+                rows = []
+            else:
+                rows = list(reversed(rows[-limit:]))
 
-    def save_session_to_chat_history(self, name):
-        session_messages = self.retrieve_session_history()
-        chat_history = [
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in session_messages
-        ]
-        return self.insert_to_chat_history(name, chat_history)
+        if limit is None:
+            rows = list(rows)
+
+        return [dict(row) for row in rows]
 
     def clear_session_history(self):
-        self.sh_cursor.execute("DELETE FROM session_history")
-        self.session_history.commit()
-
-    def delete_chat_history(self, chat_id):
-        self.ch_cursor.execute("DELETE FROM chat_history WHERE id = ?", (chat_id,))
-        self.con.commit()
+        self._session_rows.clear()
+        self._next_session_id = 1
 
     def set_preference(self, key: str, value: str):
         self.ch_cursor.execute(
@@ -163,15 +83,12 @@ class SessionHistory:
         self.con.commit()
 
     def get_preference(self, key: str, default: str | None = None) -> str | None:
-        self.ch_cursor.execute(
-            "SELECT value FROM preferences WHERE key = ?", (key,)
-        )
+        self.ch_cursor.execute("SELECT value FROM preferences WHERE key = ?", (key,))
         row = self.ch_cursor.fetchone()
         return row[0] if row else default
 
     def close(self):
         self.con.close()
-        self.session_history.close()
 
     def __enter__(self):
         return self
