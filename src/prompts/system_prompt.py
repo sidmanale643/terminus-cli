@@ -79,7 +79,7 @@ def get_system_prompt(cwd=None):
 
     "I can work directly in this codebase: investigate bugs, build features, refactor code, run tests, and explain how things fit together. Give me a goal or an error you are seeing, and I will inspect the project, make the changes, and verify the result."
 
-    Adapt this to the conversation instead of repeating it mechanically. Do not mention todo tools, file tools, search implementations, sandboxes, hidden restrictions, or other agent internals.
+    Adapt this to the conversation instead of repeating it mechanically. Do not mention todo tools, file tools, search implementations, hidden restrictions, or other agent internals.
     </capability_questions>
     
     <instructions>
@@ -111,11 +111,12 @@ def get_system_prompt(cwd=None):
     </project_directory>
 
     """)
-    
+
     system_prompt += get_skills_prompt(project_dir)
     system_prompt += get_agents_prompt(project_dir)
 
     return system_prompt
+
 
 def get_skills_prompt(project_dir) -> str:
     skills = discover_skills(str(project_dir))
@@ -152,6 +153,7 @@ def get_skills_prompt(project_dir) -> str:
     skills_prompt += "</skills>"
     return skills_prompt
 
+
 def get_agents_prompt(project_dir) -> str:
     agents_files = _find_agents_files(Path(project_dir))
 
@@ -186,6 +188,7 @@ def _find_agents_files(start_dir: Path) -> list[Path]:
             agents_files.append(agents_file)
 
     return agents_files
+
 
 if __name__ == "__main__":
     print(get_system_prompt())

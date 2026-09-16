@@ -8,8 +8,6 @@ from src.tools import (
     FileEditor,
     SubAgent,
     AskQuestion,
-    Sandbox,
-    WebSearch,
     LoadSkill,
 )
 
@@ -23,8 +21,6 @@ ALL_TOOL_CLASSES = [
     FileEditor,
     SubAgent,
     AskQuestion,
-    Sandbox,
-    WebSearch,
     LoadSkill,
 ]
 
@@ -33,7 +29,6 @@ class ToolRegistry:
     def __init__(
         self,
         exclude_tool_names=None,
-        cwd=None,
         tools=None,
     ):
         exclude_tool_names = set(exclude_tool_names or [])
@@ -47,9 +42,6 @@ class ToolRegistry:
                 if tool.name not in exclude_tool_names:
                     self.tool_box[tool.name] = tool
         self.tool_schemas = self._generate_schemas(self.tool_box)
-
-    def shutdown(self):
-        pass
 
     @staticmethod
     def _register_tools(registry, classes, exclude_names=None):
@@ -75,13 +67,5 @@ class ToolRegistry:
     def _run(registry, tool_name, **kwargs):
         return registry[tool_name].run(**kwargs)
 
-    @staticmethod
-    async def _arun(registry, tool_name, **kwargs):
-        tool = registry[tool_name]
-        return await tool.arun(**kwargs)
-
     def run_tool(self, tool_name, **kwargs):
         return self._run(self.tool_box, tool_name, **kwargs)
-
-    async def run_tool_async(self, tool_name, **kwargs):
-        return await self._arun(self.tool_box, tool_name, **kwargs)

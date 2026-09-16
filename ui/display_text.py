@@ -204,10 +204,10 @@ def tool_call_label(
             return f"multi-edit {path}"
         return f"edit {path}" if path else "edit file"
 
-    if name in {"repo_search", "web_search"}:
+    if name == "repo_search":
         query = str(args.get("query") or "").strip()
         path = args.get("path") or args.get("path_glob") or ""
-        if name == "repo_search" and args.get("files_only"):
+        if args.get("files_only"):
             return f"list files in {path or '.'}"
         if query and path:
             return f"search {query!r} in {path}"
@@ -218,10 +218,6 @@ def tool_call_label(
     if name == "check_runner":
         command = str(args.get("command") or "").strip()
         return f"check $ {one_line(command, 120)}" if command else "run check"
-
-    if name == "sandbox":
-        language = args.get("language") or "python"
-        return f"sandbox ({language})"
 
     if name == "subagent":
         task = str(args.get("task") or "").strip()
@@ -295,12 +291,6 @@ def tool_arg_detail_lines(tool_name: str, args: dict[str, Any] | None) -> list[s
         old_strings = args.get("old_strings")
         if isinstance(old_strings, list) and len(old_strings) > 1:
             lines.append(f"edits  {len(old_strings)}")
-        return lines
-
-    if name == "web_search":
-        max_results = args.get("max_results") or args.get("num_results")
-        if max_results:
-            lines.append(f"results  {max_results}")
         return lines
 
     # Generic fallback: skip bulky/nested fields; never dump whole args as JSON.
