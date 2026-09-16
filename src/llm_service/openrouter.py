@@ -1,31 +1,29 @@
-from typing import List, Dict, Optional
+from typing import Dict, Iterator, List, Optional
 from src.models.llm import Response
-from openai import OpenAI, AsyncOpenAI
-from src.utils import parse_tool_calls
-from src.llm_service.base_class import LlmProvider
+from src.constants import DEFAULT_MODEL
+from openai import OpenAI
 
-from dotenv import load_dotenv
 import os
 
-load_dotenv(os.path.expanduser("~/.terminus/.env"))
-load_dotenv()
 
+class OpenRouterProvider:
+    def __init__(self):
+        self._api_key: str | None = None
 
-class OpenRouterProvider(LlmProvider):
-    def __init__(self, name: str):
-        super().__init__()
-        self.name = name
+    def set_api_key(self, key: str) -> None:
+        self._api_key = key
+
+    def _get_api_key(self) -> str:
+        if self._api_key:
+            return self._api_key
+        api_key = os.getenv("OPEN_ROUTER_API_KEY")
+        if api_key:
+            return api_key
+        raise ValueError("OPEN_ROUTER_API_KEY environment variable not set")
 
     def _client(self):
-        api_key = self._get_api_key("OPEN_ROUTER_API_KEY", "OPENROUTER_API_KEY")
+        api_key = self._get_api_key()
         return OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
-
-    def _async_client(self):
-        api_key = self._get_api_key("OPEN_ROUTER_API_KEY", "OPENROUTER_API_KEY")
-        return AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
@@ -37,7 +35,6 @@ class OpenRouterProvider(LlmProvider):
         tool_choice: str,
         model_name: str,
         temperature: float,
-        provider_routing: Optional[List[str]] = None,
         response_format: Optional[Dict] = None,
     ) -> Dict:
         request_params = {
@@ -46,17 +43,15 @@ class OpenRouterProvider(LlmProvider):
             "temperature": temperature,
             "extra_body": {"usage": {"include": True}},
         }
-        if provider_routing:
-            request_params["extra_body"]["provider"] = {"order": provider_routing}
         if response_format:
             request_params["response_format"] = response_format
-        if tools and len(tools) > 0:
+        if tools:
             request_params["tools"] = tools
             request_params["tool_choice"] = tool_choice
             request_params["parallel_tool_calls"] = True
         return request_params
 
-    def _parse_response(self, response, temperature: float) -> Response:
+    def _parse_response(self, response) -> Response:
         choice = response.choices[0].message
         content = getattr(choice, "content", "") or ""
         reasoning_text = getattr(choice, "reasoning", None)
@@ -72,8 +67,7 @@ class OpenRouterProvider(LlmProvider):
         if completion_details:
             reasoning_tokens = getattr(completion_details, "reasoning_tokens", 0)
 
-        tool_calls = parse_tool_calls(getattr(choice, "tool_calls", None))
-        stop_reason = "tool_use" if tool_calls else "end_turn"
+        tool_calls = getattr(choice, "tool_calls", None) or []
 
         print(
             f"Usage - Prompt: {prompt_tokens}, Completion: {completion_tokens}, "
@@ -85,10 +79,8 @@ class OpenRouterProvider(LlmProvider):
         return Response(
             content=content,
             tool_calls=tool_calls,
-            stop_reason=stop_reason,
             reasoning=reasoning_text,
             model=response.model,
-            temperature=temperature,
             prompt_tokens=prompt_tokens,
             response_tokens=completion_tokens,
         )
@@ -98,9 +90,8 @@ class OpenRouterProvider(LlmProvider):
         messages: List[Dict],
         tools: Optional[List[Dict]] = None,
         tool_choice: str = "auto",
-        model_name: str = "deepseek/deepseek-v4-flash-0731",
+        model_name: str = DEFAULT_MODEL,
         temperature: float = 0.3,
-        provider_routing: Optional[List[str]] = None,
         response_format: Optional[Dict] = None,
     ) -> Response:
         """
@@ -114,110 +105,51 @@ class OpenRouterProvider(LlmProvider):
                 tool_choice,
                 model_name,
                 temperature,
-                provider_routing,
                 response_format,
             )
             response = client.chat.completions.create(**request_params)
-            return self._parse_response(response, temperature)
-        except Exception as e:
-            raise Exception(f"Error in OpenRouterProvider: {type(e).__name__}: {e}")
-
-    async def agenerate(
-        self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None,
-        tool_choice: str = "auto",
-        model_name: str = "deepseek/deepseek-v4-flash-0731",
-        temperature: float = 0.3,
-        provider_routing: Optional[List[str]] = None,
-        response_format: Optional[Dict] = None,
-    ) -> Response:
-        """Async generate using AsyncOpenAI."""
-        try:
-            client = self._async_client()
-            request_params = self._build_request_params(
-                messages,
-                tools,
-                tool_choice,
-                model_name,
-                temperature,
-                provider_routing,
-                response_format,
-            )
-            response = await client.chat.completions.create(**request_params)
-            return self._parse_response(response, temperature)
+            return self._parse_response(response)
         except Exception as e:
             raise Exception(
-                f"Error in OpenRouterProvider async: {type(e).__name__}: {e}"
-            )
+                f"Error in OpenRouterProvider: {type(e).__name__}: {e}"
+            ) from e
 
     def stream(
         self,
         messages: List[Dict],
         tools: Optional[List[Dict]] = None,
         tool_choice: str = "auto",
-        model_name: str = "deepseek/deepseek-v4-flash-0731",
+        model_name: str = DEFAULT_MODEL,
         temperature: float = 0.3,
-        stream: bool = True,
-        provider_routing: Optional[List[str]] = None,
         response_format: Optional[Dict] = None,
-    ) -> Response:
+    ) -> Iterator[Response]:
         """
         Stream a response from OpenRouter.
         """
-        api_key = self._get_api_key("OPEN_ROUTER_API_KEY", "OPENROUTER_API_KEY")
-
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-        )
-
         try:
-            request_params = {
-                "model": model_name,
-                "messages": messages,
-                "temperature": temperature,
-                "stream": True,
-                "extra_body": {
-                    "usage": {"include": True},
-                    "reasoning": {"enabled": True},
-                },
-            }
+            client = self._client()
+            request_params = self._build_request_params(
+                messages,
+                tools,
+                tool_choice,
+                model_name,
+                temperature,
+                response_format,
+            )
+            request_params["stream"] = True
+            request_params["extra_body"]["reasoning"] = {"enabled": True}
+            response_stream = client.chat.completions.create(**request_params)
 
-            if provider_routing:
-                request_params["extra_body"]["provider"] = {"order": provider_routing}
-            if response_format:
-                request_params["response_format"] = response_format
-
-            # Add tools if provided
-            if tools and len(tools) > 0:
-                request_params["tools"] = tools
-                request_params["tool_choice"] = tool_choice
-                request_params["parallel_tool_calls"] = True
-
-            stream = client.chat.completions.create(**request_params)
-
-            for chunk in stream:
+            for chunk in response_stream:
                 choices = getattr(chunk, "choices", None) or []
                 choice = choices[0].delta if choices else None
                 content = getattr(choice, "content", "") or ""
                 reasoning_text = getattr(choice, "reasoning", None)
 
-                tool_calls = parse_tool_calls(getattr(choice, "tool_calls", None))
+                tool_calls = getattr(choice, "tool_calls", None) or []
                 usage = getattr(chunk, "usage", None)
 
-                if (
-                    content
-                    or (tool_calls and len(tool_calls) > 0)
-                    or reasoning_text
-                    or usage
-                ):
-                    stop_reason = (
-                        "tool_use"
-                        if (tool_calls and len(tool_calls) > 0)
-                        else "end_turn"
-                    )
-
+                if content or tool_calls or reasoning_text or usage:
                     # Extract usage from chunk if available (usually in the last chunk)
                     prompt_tokens = None
                     response_tokens = None
@@ -250,24 +182,14 @@ class OpenRouterProvider(LlmProvider):
 
                     yield Response(
                         content=content,
-                        tool_calls=tool_calls if len(tool_calls) > 0 else None,
-                        stop_reason=stop_reason,
+                        tool_calls=tool_calls if tool_calls else None,
                         reasoning=reasoning_text,
                         model=getattr(chunk, "model", None),
-                        temperature=temperature,
                         prompt_tokens=prompt_tokens,
                         response_tokens=response_tokens,
                     )
 
         except Exception as e:
-            print(f"Error in OpenRouterProvider: {type(e).__name__}: {e}")
-            yield Response(
-                content="",
-                tool_calls=None,
-                stop_reason="error",
-                reasoning=None,
-                model=None,
-                temperature=None,
-                prompt_tokens=None,
-                response_tokens=None,
-            )
+            raise Exception(
+                f"Error in OpenRouterProvider: {type(e).__name__}: {e}"
+            ) from e
