@@ -3,28 +3,11 @@ import json
 import os
 
 
-def parse_tool_calls(tool_calls):
-    """
-    Parse tool calls from LLM response.
-    Handles both complete tool calls and streaming deltas.
-    Returns a list of tool calls or an empty list if none.
-    """
-    if tool_calls is None:
-        return []
-    
-    # If it's already a list, return it
-    if isinstance(tool_calls, list):
-        return tool_calls
-    
-    # Otherwise return empty list
-    return []
-
-
 def parse_file_references(user_input: str):
     """
     Parse @filename references from user input.
     Returns a list of file paths and the cleaned message.
-    
+
     Examples:
         "@file.py what does this do?" -> (["file.py"], "what does this do?")
         "compare @a.py and @b.py" -> (["a.py", "b.py"], "compare and")
@@ -32,18 +15,18 @@ def parse_file_references(user_input: str):
     if not user_input:
         return [], ""
     import re
-    
+
     # Pattern to match @filename (supports various file extensions and paths)
-    pattern = r'@([\w\-./]+(?:\.\w+)?)'
-    
+    pattern = r"@([\w\-./]+(?:\.\w+)?)"
+
     # Find all file references
     file_refs = re.findall(pattern, user_input)
-    
+
     # Remove @ references from the message
-    cleaned_message = re.sub(pattern, '', user_input).strip()
+    cleaned_message = re.sub(pattern, "", user_input).strip()
     # Clean up extra spaces
-    cleaned_message = re.sub(r'\s+', ' ', cleaned_message)
-    
+    cleaned_message = re.sub(r"\s+", " ", cleaned_message)
+
     return file_refs, cleaned_message
 
 
@@ -53,7 +36,7 @@ def load_file_content(file_path):
     Raises FileNotFoundError if file doesn't exist.
     """
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             file_content = f.read()
         return file_content
     except FileNotFoundError:
@@ -73,48 +56,49 @@ def format_file_context(file_path: str, content: str) -> str:
 </file>"""
 
 
-def process_file_references(user_input: str):
+def process_file_references(user_input: str, cwd: str | None = None):
     """
     Process user input with @file references.
     Returns enriched message with file contents and list of loaded files.
-    
+
     Returns:
         tuple: (enriched_message, loaded_files, errors)
     """
     file_refs, cleaned_message = parse_file_references(user_input)
-    
+
     if not file_refs:
         return user_input, [], []
-    
+
     loaded_files = []
     errors = []
     file_contexts = []
-    
+
     for file_path in file_refs:
         try:
-            content = load_file_content(file_path)
+            resolved_path = file_path
+            if cwd and not os.path.isabs(resolved_path):
+                resolved_path = os.path.join(cwd, resolved_path)
+            content = load_file_content(resolved_path)
             file_contexts.append(format_file_context(file_path, content))
             loaded_files.append(file_path)
         except Exception as e:
             errors.append(str(e))
-    
+
     # Construct the enriched message
     if file_contexts:
         enriched_message = f"{cleaned_message}\n\n{''.join(file_contexts)}"
     else:
         enriched_message = cleaned_message
-    
+
     return enriched_message, loaded_files, errors
 
-def compact(messages: List[Dict[str, Any]], llm_service, model_name: str | None = None) -> List[Dict[str, Any]]:
+
+def summarize_messages(
+    messages: List[Dict[str, Any]], llm_service, model_name: str | None = None
+) -> str:
     from src.prompts.compaction_prompt import get_compaction_prompt
 
-    if len(messages) <= 2:
-        return messages[:]
-
-    retained_message = messages[-1] if messages[-1].get("role") == "user" else None
-    messages_to_summarize = messages[:-1] if retained_message else messages
-    history = json.dumps(messages_to_summarize, ensure_ascii=False, default=str)
+    history = json.dumps(messages, ensure_ascii=False, default=str)
 
     summarize_prompt = (
         f"{get_compaction_prompt()}\n\n"
@@ -128,17 +112,8 @@ def compact(messages: List[Dict[str, Any]], llm_service, model_name: str | None 
         model_name=model_name,
         temperature=0.3,
     )
-    summary = response.content or ""
+    return response.content or ""
 
-    compacted = [
-        {"role": "system", "content": "Previous context summarized below."},
-        {"role": "system", "content": summary},
-    ]
-
-    if retained_message:
-        compacted.append(retained_message)
-
-    return compacted
 
 def discover_skills(cwd: str | None = None) -> list[dict]:
     """Discover skills from local .skills/ and terminus-cli/.skills/."""
@@ -201,15 +176,16 @@ def discover_skills(cwd: str | None = None) -> list[dict]:
             description = metadata.get("description", "")
             trigger = metadata.get("trigger", "")
 
-            skills.append({
-                "name": skill_name,
-                "description": str(description).strip() if description else "",
-                "trigger": str(trigger).strip() if trigger else "",
-                "allowed_tools": metadata.get("allowed-tools", []),
-                "metadata": metadata,
-                "file": path,
-                "content": content,
-            })
+            skills.append(
+                {
+                    "name": skill_name,
+                    "description": str(description).strip() if description else "",
+                    "trigger": str(trigger).strip() if trigger else "",
+                    "allowed_tools": metadata.get("allowed-tools", []),
+                    "metadata": metadata,
+                    "file": path,
+                    "content": content,
+                }
+            )
 
     return sorted(skills, key=lambda skill: skill["name"])
-    

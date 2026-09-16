@@ -1,7 +1,11 @@
+import json
+import math
 from typing import Any, Dict, List, Optional
-from src.utils import compact
+
+from src.utils import summarize_messages
 
 SKILL_MESSAGE_PREFIX = "Skill loaded:"
+CHARS_PER_TOKEN = 4
 
 
 class ContextManager:
@@ -13,56 +17,49 @@ class ContextManager:
     ):
         self.context: List[Dict[str, Any]] = []
         self.context_size: int = 0
-        self.message_context_size: List[int] = []
         self.model_context_size = model_context_size
         self.llm_service = llm_service
         self.model_name = model_name
 
-    def add_message(self, role: str, content: str, **kwargs) -> Dict[str, Any]:
+    def add_message(self, role: str, content: Any, **kwargs) -> Dict[str, Any]:
         message = {"role": role, "content": content, **kwargs}
         self.context.append(message)
-        size = len(content or "")
-        self.message_context_size.append(size)
+        size = self._estimate_message_tokens(message)
         self.context_size += size
         return message
 
     def replace_messages(self, messages: List[Dict[str, Any]]) -> None:
         """Replace the context in one pass, for restores and other bulk operations."""
-        self.context = list(messages)
+        self.context = [dict(message) for message in messages]
         self.update_context_size()
 
-    def set_system_message(self, content: str):
-        if self.context and self.context[0].get("role") == "system":
-            previous_size = self.message_context_size[0] if self.message_context_size else 0
-            self.context[0]["content"] = content
-            size = len(content or "")
-            if self.message_context_size:
-                self.message_context_size[0] = size
-                self.context_size += size - previous_size
-            else:
-                self.update_context_size()
-        else:
-            self.context.insert(0, {"role": "system", "content": content})
-            size = len(content or "")
-            self.message_context_size.insert(0, size)
-            self.context_size += size
+    @staticmethod
+    def _estimate_message_tokens(message: Dict[str, Any]) -> int:
+        """Estimate the tokens sent for one complete API message.
 
-    def update_context_size(self):
-        sizes = []
-        for message in self.context:
-            msg_content = message.get("content", "") or ""
-            sizes.append(len(msg_content))
-        self.message_context_size = sizes
-        self.context_size = sum(sizes)
+        The project does not carry a tokenizer for every supported provider, so
+        use one consistent character-based approximation. Serializing the whole
+        message also accounts for tool-call metadata and arguments rather than
+        counting only ``content``.
+        """
+        try:
+            serialized = json.dumps(message, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            serialized = str(message)
+        return max(1, math.ceil(len(serialized) / CHARS_PER_TOKEN))
+
+    def update_context_size(self) -> None:
+        self.context_size = sum(
+            self._estimate_message_tokens(message) for message in self.context
+        )
 
     def should_compact(self, threshold_ratio: float = 0.8) -> bool:
         if not self.context:
             return False
-        estimated_tokens = self.context_size / 4
         threshold = self.model_context_size * threshold_ratio
-        return estimated_tokens >= threshold
+        return self.context_size >= threshold
 
-    def compact(self, status_callback=None):
+    def compact(self):
         if len(self.context) <= 2:
             return None
         before_count = len(self.context)
@@ -71,52 +68,39 @@ class ContextManager:
 
         for index, message in enumerate(self.context):
             is_base_system = index == 0 and message.get("role") == "system"
-            is_skill_system = (
-                message.get("role") == "system"
-                and (message.get("content", "") or "").startswith(SKILL_MESSAGE_PREFIX)
-            )
+            is_skill_system = message.get("role") == "system" and (
+                message.get("content", "") or ""
+            ).startswith(SKILL_MESSAGE_PREFIX)
             if is_base_system or is_skill_system:
                 preserved_system_messages.append(message)
             else:
                 summarizable_messages.append(message)
 
-        compacted_messages = compact(
+        retained_message = (
+            summarizable_messages.pop()
+            if summarizable_messages and summarizable_messages[-1].get("role") == "user"
+            else None
+        )
+        if not summarizable_messages:
+            return None
+
+        summary = summarize_messages(
             summarizable_messages,
             self.llm_service,
             model_name=self.model_name,
         )
-        if compacted_messages and compacted_messages[0].get("content") == "Previous context summarized below.":
-            compacted_messages = compacted_messages[1:]
-
+        compacted_messages = [{"role": "system", "content": summary}]
+        if retained_message:
+            compacted_messages.append(retained_message)
         self.context = preserved_system_messages + compacted_messages
         self.update_context_size()
         after_count = len(self.context)
-        summary = ""
-        for message in compacted_messages:
-            if message.get("role") == "system":
-                summary = message.get("content", "")
-                break
         return {
             "before_count": before_count,
             "after_count": after_count,
             "summary": summary,
         }
 
-    def trim(self, keep_slots: int = 15):
-        if len(self.context) <= keep_slots + 1:
-            return
-        system = self.context[0] if self.context[0].get("role") == "system" else None
-        recent = self.context[-keep_slots:]
-        self.context = [system] + recent if system else recent
-        self.update_context_size()
-
-    def trim_raw_tool_outputs(self):
-        before = len(self.context)
-        self.context = [m for m in self.context if m.get("role") != "tool"]
-        self.update_context_size()
-        return before - len(self.context)
-
-    def clear(self):
-        self.context.clear()
+    def clear(self) -> None:
+        self.context = []
         self.context_size = 0
-        self.message_context_size = []
